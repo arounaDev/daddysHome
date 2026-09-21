@@ -159,6 +159,12 @@ struct VoiceRouter {
             store.showVoiceToast(VoiceToast(label: confirmLabel, undoAction: nil))
             return .ok(confirmLabel)
 
+        case .boardDispatch(let ids, let confirmLabel):
+            store.workspace = .board
+            store.pendingBoardDispatchIDs = ids
+            store.showVoiceToast(VoiceToast(label: confirmLabel, undoAction: nil))
+            return .ok(confirmLabel)
+
         case .failed(let reason):
             store.showVoiceToast(VoiceToast(label: reason, undoAction: nil))
             return .refused(reason)

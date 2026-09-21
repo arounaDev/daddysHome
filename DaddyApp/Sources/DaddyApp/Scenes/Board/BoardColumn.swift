@@ -25,6 +25,9 @@ struct BoardColumn: View {
     let onSendToOrchestrator: (OrchestratorWorkItem) -> Void
     let onToggleBundleCollapsed: (UUID) -> Void
     let onOpenBundle: (UUID) -> Void
+    /// Cmd+B: pick the whole bundle as one unit (lead item). Distinct from
+    /// `onSelect`, which opens a member's detail when a row is clicked.
+    let onPickBundle: (OrchestratorWorkItem) -> Void
     let draggingID: UUID?
     let isDropTarget: Bool
     let onDragChanged: (OrchestratorWorkItem, CGPoint) -> Void
@@ -242,17 +245,28 @@ struct BoardColumn: View {
     @ViewBuilder
     private func unit(_ unit: Unit, showsCategory: Bool) -> some View {
         if unit.items.count > 1, let bundleID = unit.bundleID {
+            // Drag uses the first member as the representative — `BoardView`
+            // expands to every item sharing this `bundleID` on drop.
+            let lead = unit.items[0]
             BoardBundleCard(
                 bundleID: bundleID,
                 items: unit.items,
                 isCollapsed: collapsedBundleIDs.contains(bundleID),
+                isDragging: unit.items.contains { $0.id == draggingID },
+                isSelectionCursor: selectionModeActive && cursorID == lead.id,
+                isPicked: selectionModeActive && pickedIDs.contains(lead.id),
+                selectionModeActive: selectionModeActive,
                 selectedID: selectedID,
                 showsCategory: showsCategory,
                 projectName: projectName,
                 onToggleCollapsed: { onToggleBundleCollapsed(bundleID) },
                 onSelectItem: { onSelect($0) },
-                onOpenDetail: { onOpenBundle(bundleID) }
+                onPickBundle: { onPickBundle(lead) },
+                onOpenDetail: { onOpenBundle(bundleID) },
+                onDragChanged: { onDragChanged(lead, $0) },
+                onDragEnded: { onDragEnded(lead, $0) }
             )
+            .id(lead.id)
         } else {
             card(unit.items[0], showsCategory: showsCategory)
                 .id(unit.items[0].id)

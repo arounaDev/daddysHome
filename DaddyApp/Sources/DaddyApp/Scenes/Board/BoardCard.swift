@@ -49,7 +49,17 @@ struct BoardCard: View {
             .overlay {
                 if isSelectionCursor || isPicked {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .strokeBorder(DaddyTheme.accent.opacity(isPicked ? 0.9 : 0.45), lineWidth: isPicked ? 2 : 1.5)
+                        .fill(DaddyTheme.accent.opacity(isPicked ? 0.16 : 0.10))
+                        .allowsHitTesting(false)
+                }
+            }
+            .overlay {
+                if isSelectionCursor || isPicked {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(
+                            DaddyTheme.accent.opacity(isPicked ? 0.95 : 0.75),
+                            lineWidth: isPicked ? 2.5 : 2
+                        )
                 }
             }
             .opacity(isDragging ? 0.3 : 1)

@@ -12,12 +12,15 @@ import DaddyCore
 struct VoiceKanbanResolver {
     let store: MockStore
 
-    enum Resolution {
+        enum Resolution {
         /// A reversible action: `undoAction` restores the prior state.
         case reversible(AppAction, confirmLabel: String, undoAction: AppAction)
         /// Not meaningfully reversible (e.g. dispatch launches a session) —
         /// confirmation only, no Undo button.
         case irreversible(AppAction, confirmLabel: String)
+        /// Open the board's agent picker without moving yet — same gate as
+        /// dropping a card onto DISPATCHED.
+        case boardDispatch(ids: [UUID], confirmLabel: String)
         case failed(String)
     }
 
@@ -87,6 +90,22 @@ struct VoiceKanbanResolver {
         let category = categoryHint.flatMap(resolveCategory)
         guard status != nil || category != nil else {
             return .failed("didn't catch where to move \"\(item.title)\"")
+        }
+
+        // DISPATCHED always means "start a session" — never a silent status
+        // write. Hand the cohort to the board picker (bundle members included).
+        if status == .dispatched {
+            let ids: [UUID]
+            if let bundleID = item.bundleID {
+                let members = store.orchestratorWorkItems.filter { $0.bundleID == bundleID }
+                ids = members.isEmpty ? [item.id] : members.map(\.id)
+            } else {
+                ids = [item.id]
+            }
+            return .boardDispatch(
+                ids: ids,
+                confirmLabel: "Pick an agent for \"\(item.title)\""
+            )
         }
 
         return .reversible(

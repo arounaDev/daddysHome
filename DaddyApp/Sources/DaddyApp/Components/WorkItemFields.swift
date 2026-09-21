@@ -115,7 +115,7 @@ struct WorkItemFields: View {
                     selectedIndex: OrchestratorWorkCategory.allCases.firstIndex(of: category),
                     focus: $categoryFocused,
                     onTabForward: { statusFocused = true },
-                    onTabBackward: { summaryFocus?.wrappedValue = true }
+                    onTabBackward: focusBeforeCategory
                 ) {
                     fieldTrigger(
                         title: category.title,
@@ -221,13 +221,19 @@ struct WorkItemFields: View {
 
             Button("Save Work Item", action: commit)
                 .buttonStyle(.insetLarge(DaddyTheme.accent))
+                // Without this the button is not in the focus system at all:
+                // `.focused` is inert, this `.onKeyPress` never fires, and the
+                // Tab out of PROJECT that asked for it left focus nowhere — so
+                // the Tab after it was answered by the window's key view loop
+                // and lit up the board's header buttons instead.
+                .focusable()
                 .focused($saveFocused)
                 .onKeyPress { press in
                     guard press.key == .tab else { return .ignored }
                     if press.modifiers.contains(.shift) {
                         projectFocused = true
                     } else {
-                        titleFocus?.wrappedValue = true
+                        focusFirstField()
                     }
                     return .handled
                 }
@@ -237,6 +243,35 @@ struct WorkItemFields: View {
             guard press.key == "s", press.modifiers == .command else { return .ignored }
             commit()
             return .handled
+        }
+    }
+
+    /// The form is a closed ring: the last control hands Tab back to the
+    /// first and the first hands Shift-Tab back to the last, so focus never
+    /// falls out of it into the window's key view loop while the board's popup
+    /// is open. The Orchestrator's inspector passes no title/summary bindings,
+    /// so there the ring closes on CATEGORY instead.
+    private func focusFirstField() {
+        if let titleFocus {
+            titleFocus.wrappedValue = true
+        } else {
+            categoryFocused = true
+        }
+    }
+
+    private func focusAfterTitle() {
+        if let summaryFocus {
+            summaryFocus.wrappedValue = true
+        } else {
+            categoryFocused = true
+        }
+    }
+
+    private func focusBeforeCategory() {
+        if let summaryFocus {
+            summaryFocus.wrappedValue = true
+        } else {
+            saveFocused = true
         }
     }
 
@@ -320,7 +355,7 @@ struct WorkItemFields: View {
                 if press.modifiers.contains(.shift) {
                     saveFocused = true
                 } else {
-                    summaryFocus?.wrappedValue = true
+                    focusAfterTitle()
                 }
                 return .handled
             }
@@ -347,6 +382,10 @@ struct WorkItemFields: View {
             .insetSurface(cornerRadius: 10)
             .onKeyPress { press in
                 guard press.key == .tab else { return .ignored }
+                // Deliberately does not clear `summaryFocus` first: clearing
+                // it in the same event as focusing CATEGORY resigned focus
+                // outright, and Tab out of the summary reached no dropdown at
+                // all. SwiftUI clears it when the new field takes focus.
                 if press.modifiers.contains(.shift) {
                     titleFocus?.wrappedValue = true
                 } else {

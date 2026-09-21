@@ -140,6 +140,11 @@ struct GlassDropdown<Label: View>: View {
         }
         .onKeyPress { press in
             guard press.key == .tab else { return .ignored }
+            // Nothing is cleared on the way out: writing `false` here and
+            // `true` to the next field in the same event makes SwiftUI resign
+            // focus and never re-grant it — the chain dies mid-form and the
+            // window's key loop answers the next Tab. Moving focus to the next
+            // binding is enough; SwiftUI clears this one itself.
             if press.modifiers.contains(.shift) {
                 guard let onTabBackward else { return .ignored }
                 onTabBackward()
@@ -201,6 +206,15 @@ struct GlassDropdown<Label: View>: View {
             activateKeyboardSelection()
             return .handled
         }
+        .onKeyPress { press in
+            guard press.key == .tab else { return .ignored }
+            // Tab with the menu up closes it and hands focus back to the
+            // trigger. Unhandled, it fell through to the window's key loop
+            // and focus left the form for whatever button was nearest.
+            openBinding.wrappedValue = false
+            restoreTriggerFocus()
+            return .handled
+        }
     }
 
     private var effectiveHighlight: Int? {
@@ -208,8 +222,29 @@ struct GlassDropdown<Label: View>: View {
     }
 
     private func activate(_ item: GlassDropdownItem) {
-        if !staysOpenOnPick { openBinding.wrappedValue = false }
+        if !staysOpenOnPick {
+            openBinding.wrappedValue = false
+            restoreTriggerFocus()
+        }
         item.action()
+    }
+
+    /// Puts focus back on the trigger when the menu closes from a pick or a
+    /// Tab. The popover is its own focus scope: while it is up the trigger's
+    /// binding reads stale-true, and once it goes away nothing in the form
+    /// holds focus at all — so the Tab after picking an option was answered by
+    /// the window's key view loop and jumped to the board's header buttons.
+    /// Menus with no trigger binding (the header filters, the dispatch menus)
+    /// are unaffected.
+    private func restoreTriggerFocus() {
+        guard let triggerFocus else { return }
+        triggerFocus.wrappedValue = false
+        Task { @MainActor in
+            // After the popover has finished dismissing — set any sooner and
+            // the dismissal clears it straight back out.
+            try? await Task.sleep(for: .milliseconds(80))
+            triggerFocus.wrappedValue = true
+        }
     }
 
     private func moveKeyboard(_ delta: Int) {

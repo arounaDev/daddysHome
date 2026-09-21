@@ -37,11 +37,12 @@ struct RootView: View {
                     // rail permanently beside it, the rail would sit flush
                     // against the frame while every other panel floats.
                     ZStack {
-                        // Always mounted, always at a real size, always hit-testable.
-                        // Covering this with an `if` plus animation left a ghost
-                        // overlay, and `makeFirstResponder(nil)` plus Cursor's
-                        // mouse-reporting (clicks never focus) is how typing died.
+                        // Always mounted, always at a real size, always hit-testable
+                        // *while Fleet is the workspace*. When the board or
+                        // orchestrator covers it, clicks must not fall through
+                        // translucent glass onto the fleet header underneath.
                         FleetView()
+                            .allowsHitTesting(store.workspace == .fleet)
 
                         if store.workspace == .board {
                             workspaceCover(showsAurora: false) { BoardView() }
@@ -128,6 +129,11 @@ struct RootView: View {
                     orchestratorButton
                     settingsButton
                 }
+                // Titlebar accessories sit above the content view in AppKit —
+                // glass under them still loses the click. Disable the controls
+                // whenever a board/utility modal owns the screen.
+                .disabled(titlebarBlocked)
+                .opacity(titlebarBlocked ? 0.35 : 1)
             }
             .frame(width: 0, height: 0)
         }
@@ -155,6 +161,15 @@ struct RootView: View {
                 store.tick()
             }
         }
+    }
+
+    /// Work-item / bundle / dispatch panes and the utility drawer all sit
+    /// under the titlebar strip visually; without this the strip keeps
+    /// stealing hover and clicks through the glass.
+    private var titlebarBlocked: Bool {
+        utilityPanel != nil
+            || store.selectedOrchestratorWorkItemID != nil
+            || store.boardModalBlocksChrome
     }
 
     private var settingsButton: some View {

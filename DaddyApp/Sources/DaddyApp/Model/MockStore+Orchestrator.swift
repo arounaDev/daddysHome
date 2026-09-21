@@ -332,6 +332,30 @@ extension MockStore {
         syncGitPushWatchers()
     }
 
+    /// Clears `bundleID` on every member of the bundle — the full store, not
+    /// whatever the board filter currently shows. One array write so the UI
+    /// drops the bundle card immediately; disk follows on the sync queue.
+    func unbundleWorkItems(bundleID: UUID) {
+        let now = Date()
+        var next = orchestratorWorkItems
+        var changed: [OrchestratorWorkItem] = []
+        for index in next.indices {
+            guard next[index].bundleID == bundleID else { continue }
+            next[index].bundleID = nil
+            next[index].updatedAt = now
+            changed.append(next[index])
+        }
+        guard !changed.isEmpty else { return }
+        orchestratorWorkItems = next
+        Task {
+            for item in changed {
+                await syncCoordinator.save(item)
+                noteSyncOutcome(for: item)
+            }
+        }
+        syncGitPushWatchers()
+    }
+
     /// Board dispatch: mark the card, hop, paste once the live terminal exists.
     func dispatchWorkItem(_ id: UUID, onto agent: MockAgent) {
         guard let item = workItem(id) else { return }

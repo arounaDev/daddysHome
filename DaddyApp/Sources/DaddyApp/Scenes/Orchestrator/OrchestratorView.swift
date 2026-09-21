@@ -620,7 +620,9 @@ struct OrchestratorView: View {
 
     private func saveInspector() {
         guard var item = selectedItem else { return }
-        item.title = inspectorTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        let styledTitle = WorkItemTitleCase.apply(inspectorTitle)
+        inspectorTitle = styledTitle
+        item.title = styledTitle
         item.summary = inspectorSummary
         item.category = inspectorCategory
         item.status = inspectorStatus

@@ -75,6 +75,14 @@ final class MockStore {
     /// time — a second voice command replaces whatever's showing.
     var voiceToast: VoiceToast?
     @ObservationIgnored var voiceToastDismissTask: Task<Void, Never>?
+    /// Voice (or anything outside the board UI) asking the board to open the
+    /// agent picker for these work items — same flow as dropping onto
+    /// DISPATCHED. BoardView consumes and clears it.
+    var pendingBoardDispatchIDs: [UUID]?
+    /// Board detail / bundle / dispatch panes block the window titlebar
+    /// chrome — AppKit puts those accessories above content, so glass alone
+    /// cannot steal their clicks.
+    var boardModalBlocksChrome = false
     var selectedOrchestratorWorkItemID: UUID?
     var orchestratorStreamingText = ""
     var orchestratorBusy = false

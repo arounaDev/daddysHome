@@ -78,6 +78,7 @@ struct BoardView: View {
     var body: some View {
         boardPane
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay { boardModalScrim }
             .overlay(alignment: .trailing) { detailOverlay }
             .overlay(alignment: .trailing) { bundleDetailOverlay }
             .overlay { dispatchOverlay }
@@ -85,9 +86,62 @@ struct BoardView: View {
         .onAppear {
             syncScopeFromProject()
             installKeyboardMonitor()
+            consumePendingBoardDispatch()
+            syncBoardChromeBlock()
         }
-        .onDisappear { removeKeyboardMonitor() }
+        .onDisappear {
+            removeKeyboardMonitor()
+            store.boardModalBlocksChrome = false
+        }
         .onChange(of: store.selectedProjectID) { _, _ in syncScopeFromProject() }
+        .onChange(of: store.pendingBoardDispatchIDs) { _, _ in consumePendingBoardDispatch() }
+        .onChange(of: store.selectedOrchestratorWorkItemID) { _, _ in syncBoardChromeBlock() }
+        .onChange(of: openBundleID) { _, _ in syncBoardChromeBlock() }
+        .onChange(of: pendingDispatch?.count) { _, _ in syncBoardChromeBlock() }
+    }
+
+    /// True while any board modal owns the interaction — detail, bundle, or
+    /// the dispatch picker.
+    private var boardModalActive: Bool {
+        selectedItem != nil || openBundleID != nil || pendingDispatch != nil
+    }
+
+    private func syncBoardChromeBlock() {
+        let blocked = boardModalActive
+        if store.boardModalBlocksChrome != blocked {
+            store.boardModalBlocksChrome = blocked
+        }
+    }
+
+    /// Full-bleed catcher under the panes. Without it, empty overlay space
+    /// (and translucent glass) lets the board — and anything still mounted
+    /// under it — keep receiving hover and clicks.
+    @ViewBuilder
+    private var boardModalScrim: some View {
+        if boardModalActive {
+            Color.black.opacity(0.28)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if pendingDispatch != nil {
+                        pendingDispatch = nil
+                    } else if openBundleID != nil {
+                        openBundleID = nil
+                    } else {
+                        closeDetail()
+                    }
+                }
+                .transition(.opacity)
+        }
+    }
+
+    /// Voice (and any other non-board path) can stage IDs on the store; once
+    /// the board is up it opens the same agent picker a DISPATCHED drop does.
+    private func consumePendingBoardDispatch() {
+        guard let ids = store.pendingBoardDispatchIDs else { return }
+        store.pendingBoardDispatchIDs = nil
+        let moving = ids.compactMap { store.workItem($0) }
+        guard !moving.isEmpty else { return }
+        pendingDispatch = moving
     }
 
     // MARK: - Board
@@ -123,6 +177,7 @@ struct BoardView: View {
                         onSendToOrchestrator: { sendToOrchestrator($0) },
                         onToggleBundleCollapsed: { toggleBundleCollapsed($0) },
                         onOpenBundle: { openBundleID = $0 },
+                        onPickBundle: { handleBundlePick($0) },
                         draggingID: draggingID,
                         isDropTarget: target == status,
                         onDragChanged: dragChanged,
@@ -178,18 +233,39 @@ struct BoardView: View {
         withTransaction(transaction) {
             draggingID = nil
             dropTarget = nil
-            guard let target = columnFrames.first(where: { $0.value.contains(point) })?.key,
-                  target != item.status.boardColumn else { return }
-
-            // DISPATCHED means an agent has it. Rather than move the card and
-            // leave you to go find one, the drop asks which agent — and only
-            // commits once you have said. Dismissing leaves the card put.
-            if target == .dispatched {
-                pendingDispatch = [item]
-                return
-            }
-            AppActionDispatcher(store: store).perform(.moveWorkItem(id: item.id, status: target, category: nil))
+            guard let target = columnFrames.first(where: { $0.value.contains(point) })?.key else { return }
+            applyBoardMove(dragCohort(for: item), to: target)
         }
+    }
+
+    /// Every path that parks cards on a column — drag, Cmd+M / Cmd+B Enter —
+    /// goes through here. DISPATCHED never writes status directly: it opens
+    /// the agent picker, and only a confirmed pick commits the move.
+    private func applyBoardMove(_ items: [OrchestratorWorkItem], to target: OrchestratorWorkStatus) {
+        let moving = items.filter { $0.status.boardColumn != target }
+        guard !moving.isEmpty else { return }
+
+        if target == .dispatched {
+            pendingDispatch = moving
+            return
+        }
+
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) {
+            for member in moving {
+                AppActionDispatcher(store: store).perform(
+                    .moveWorkItem(id: member.id, status: target, category: nil)
+                )
+            }
+        }
+    }
+
+    /// The item itself, or every member sharing its `bundleID`.
+    private func dragCohort(for item: OrchestratorWorkItem) -> [OrchestratorWorkItem] {
+        guard let bundleID = item.bundleID else { return [item] }
+        let members = items.filter { $0.bundleID == bundleID }
+        return members.isEmpty ? [item] : members
     }
 
     // MARK: - Header
@@ -659,24 +735,42 @@ struct BoardView: View {
     // MARK: - Selection mode (bundling)
 
     /// The order arrow keys move through: the same column-then-category
-    /// grouping the board draws, skipping anything hidden behind a collapsed
-    /// category group and anything already part of a bundle — bundling an
-    /// already-bundled item has nothing sensible to do.
+    /// grouping the board draws. Each bundle counts as **one** stop (its
+    /// lead item) — never every member — so the cursor can land on a
+    /// bundle and move/pick it as a unit.
     private var selectionTraversalOrder: [OrchestratorWorkItem] {
-        let visible = items.filter { $0.bundleID == nil }
         var order: [OrchestratorWorkItem] = []
         for status in columns {
-            let columnItems = visible.filter { $0.status.boardColumn == status }
+            let columnItems = items.filter { $0.status.boardColumn == status }
+            let leads = selectionLeads(in: columnItems)
             guard categoryFilter == nil else {
-                order.append(contentsOf: columnItems)
+                order.append(contentsOf: leads)
                 continue
             }
             for category in OrchestratorWorkCategory.allCases {
                 guard !collapsedGroups.contains(BoardGroupKey(status: status, category: category)) else { continue }
-                order.append(contentsOf: columnItems.filter { $0.category == category })
+                order.append(contentsOf: leads.filter { $0.category == category })
             }
         }
         return order
+    }
+
+    /// Solo cards as themselves; multi-item bundles as their first member
+    /// only — mirrors `BoardColumn`'s unit grouping.
+    private func selectionLeads(in columnItems: [OrchestratorWorkItem]) -> [OrchestratorWorkItem] {
+        var seenBundles: Set<UUID> = []
+        var leads: [OrchestratorWorkItem] = []
+        for item in columnItems {
+            if let bundleID = item.bundleID {
+                guard !seenBundles.contains(bundleID) else { continue }
+                seenBundles.insert(bundleID)
+                let members = columnItems.filter { $0.bundleID == bundleID }
+                leads.append(members.count > 1 ? members[0] : item)
+            } else {
+                leads.append(item)
+            }
+        }
+        return leads
     }
 
     private func toggleSelectionMode() {
@@ -685,7 +779,9 @@ struct BoardView: View {
             return
         }
         selectionModeActive = true
-        let seedID = selectedItem?.id
+        // If the open card is inside a bundle, land on the bundle unit (lead),
+        // not a member that isn't in the traversal order.
+        let seedID = selectedItem.map { traversalLeadID(for: $0) }
         // With no card open, prefer seeding on the selected column — Enter
         // on a column arrowed into should land the cursor there, not on
         // whatever happens to be traversal-first.
@@ -694,6 +790,14 @@ struct BoardView: View {
         }
         selectionCursorID = seedID ?? columnSeedID ?? selectionTraversalOrder.first?.id
         pickedItemIDs = seedID.map { [$0] } ?? []
+    }
+
+    /// The id the keyboard cursor uses for this item: itself, or its bundle's
+    /// lead when it's part of a multi-item bundle.
+    private func traversalLeadID(for item: OrchestratorWorkItem) -> UUID {
+        guard let bundleID = item.bundleID else { return item.id }
+        let members = items.filter { $0.bundleID == bundleID }
+        return members.count > 1 ? members[0].id : item.id
     }
 
     private func exitSelectionMode() {
@@ -745,23 +849,26 @@ struct BoardView: View {
     /// stops drawing them as one `BoardBundleCard` and closes the pane, but
     /// each item otherwise keeps its status, category, and everything else.
     private func unbundleOpenBundle() {
-        for item in openBundleItems {
-            var unbundled = item
-            unbundled.bundleID = nil
-            unbundled.updatedAt = Date()
-            AppActionDispatcher(store: store).perform(.replaceWorkItem(unbundled))
-        }
+        guard let bundleID = openBundleID else { return }
         openBundleID = nil
+        // Full store, not `openBundleItems` (board-filtered) — a category /
+        // project filter would otherwise leave siblings bundled and the card
+        // would still draw.
+        store.unbundleWorkItems(bundleID: bundleID)
     }
 
     /// Enters the move flow for a given set of items — shared by Cmd+M and
-    /// Cmd+B's bundle-then-move. Seeds the target one column over from
-    /// wherever the items currently sit, not on their own column (falling
-    /// back to the column before it if they're already in the last one).
+    /// Cmd+B's bundle-then-move. Defaults the highlight to DISPATCHED (the
+    /// usual next step after bundling); if the cards are already there,
+    /// steps one column past that instead.
     private func startMoveFlow(for sourceItems: [OrchestratorWorkItem]) {
         guard !sourceItems.isEmpty else { return }
         movingItemIDs = sourceItems.map(\.id)
         let sourceColumn = sourceItems.first?.status.boardColumn
+        if sourceColumn != .dispatched, columns.contains(.dispatched) {
+            dropTarget = .dispatched
+            return
+        }
         let sourceIndex = sourceColumn.flatMap { columns.firstIndex(of: $0) }
         if let sourceIndex, columns.indices.contains(sourceIndex + 1) {
             dropTarget = columns[sourceIndex + 1]
@@ -793,16 +900,13 @@ struct BoardView: View {
             cancelMove()
             return
         }
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            for id in ids {
-                AppActionDispatcher(store: store).perform(.moveWorkItem(id: id, status: target, category: nil))
-            }
-        }
-        if selectionModeActive { exitSelectionMode() }
+        let moving = ids.compactMap { store.workItem($0) }
         movingItemIDs = nil
         dropTarget = nil
+        if selectionModeActive { exitSelectionMode() }
+        // Same gate as a drag onto DISPATCHED — never write the column
+        // without going through the agent picker first.
+        applyBoardMove(moving, to: target)
     }
 
     private func cancelMove() {
@@ -868,13 +972,18 @@ struct BoardView: View {
     }
 
     /// First Enter on a card picks it. Enter again on an already-picked card
-    /// opens its detail pane to read/edit it — Escape (or Cmd+S) closes that
-    /// pane back to the picker, keeping every pick and the cursor put.
+    /// opens its detail pane (or the bundle summary, for a bundle unit) —
+    /// Escape (or Cmd+S) closes that pane back to the picker.
     private func selectionEnter() {
-        guard let id = selectionCursorID else { return }
+        guard let id = selectionCursorID,
+              let item = store.workItem(id) ?? items.first(where: { $0.id == id }) else { return }
         if pickedItemIDs.contains(id) {
-            guard let item = store.workItem(id) else { return }
-            select(item)
+            if let bundleID = item.bundleID,
+               items.filter({ $0.bundleID == bundleID }).count > 1 {
+                openBundleID = bundleID
+            } else {
+                select(item)
+            }
         } else {
             pickedItemIDs.append(id)
         }
@@ -882,7 +991,14 @@ struct BoardView: View {
 
     /// A card click while selection mode is active picks it instead of
     /// opening the detail pane — mirrors keyboard Enter on the cursor.
+    /// Rows inside a bundle always open that item's detail instead: the
+    /// bundle is picked as a unit from the keyboard (or its header).
     private func handleCardSelect(_ item: OrchestratorWorkItem) {
+        if let bundleID = item.bundleID,
+           items.filter({ $0.bundleID == bundleID }).count > 1 {
+            select(item)
+            return
+        }
         guard selectionModeActive else {
             select(item)
             return
@@ -892,6 +1008,21 @@ struct BoardView: View {
             pickedItemIDs.removeAll { $0 == item.id }
         } else {
             pickedItemIDs.append(item.id)
+        }
+    }
+
+    /// Keyboard/header pick of a whole bundle — stores the lead id only;
+    /// `moveSourceItems` expands to every member when moving.
+    private func handleBundlePick(_ lead: OrchestratorWorkItem) {
+        guard selectionModeActive else {
+            if let bundleID = lead.bundleID { openBundleID = bundleID }
+            return
+        }
+        selectionCursorID = lead.id
+        if pickedItemIDs.contains(lead.id) {
+            pickedItemIDs.removeAll { $0 == lead.id }
+        } else {
+            pickedItemIDs.append(lead.id)
         }
     }
 
@@ -1192,7 +1323,11 @@ private struct BoardDetailPane: View {
 
     private func save() {
         guard var fresh = store.workItem(item.id) else { return }
-        fresh.title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Title only — headline case on commit so you can type all-lowercase
+        // and Save / Cmd+S / Enter writes the proper capitals.
+        let styledTitle = WorkItemTitleCase.apply(title)
+        title = styledTitle
+        fresh.title = styledTitle
         fresh.summary = summary
         fresh.category = category
         fresh.status = status
