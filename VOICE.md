@@ -64,8 +64,6 @@ are app-scoped.
 ## Worth knowing
 
 - Parakeet models: `~/Library/Application Support/FluidAudio/Models/parakeet-tdt-0.6b-v3`.
-  Loaded with `loadLocal`, never `load` — `load(from:)` ignores the leaf of the
-  path and re-downloads. Comment in `VoiceCaptureController` explains it.
 - Kokoro: `~/.cache/fluidaudio`, voice `bm_lewis`, one constant at the top of
   `SpeechOutputController`.
 - No Apple speech anywhere. Both directions are Kokoro/Parakeet only, so a
