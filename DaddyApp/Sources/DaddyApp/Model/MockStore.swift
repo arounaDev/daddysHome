@@ -1111,12 +1111,136 @@ final class MockStore {
         }
     }
 
+    /// An action that has been understood and read back, waiting on a yes.
+    struct PendingVoiceAction {
+        let action: AppAction
+        let undoAction: AppAction?
+        /// What was said out loud, reused verbatim as the toast label so the
+        /// spoken and written confirmations cannot drift apart.
+        let summary: String
+        let askedAt: Date
+    }
+
+    /// Non-nil between "Confirm …" and your answer. The pill reads it, and so
+    /// does `submitVoice`, which treats the next transcript as the answer
+    /// rather than as a new command.
+    private(set) var pendingVoiceAction: PendingVoiceAction?
+
+    @ObservationIgnored private var pendingVoiceActionTimeout: Task<Void, Never>?
+
+    /// How long an unanswered question stands before it lapses. Long enough to
+    /// think, short enough that a forgotten one cannot be answered by accident
+    /// minutes later when you say "yes" to something else entirely.
+    private static let voiceConfirmationWindow: TimeInterval = 20
+
+    /// Read the action back and wait for a yes instead of doing it.
+    ///
+    /// Nothing is performed here. The action is held, spoken, and the mic is
+    /// reopened once Daddy has stopped talking — not before, or the mic would
+    /// record the question and transcribe Daddy's own voice as the answer.
+    @MainActor
+    func proposeVoiceAction(_ action: AppAction, summary: String, undoAction: AppAction?) {
+        pendingVoiceActionTimeout?.cancel()
+        pendingVoiceAction = PendingVoiceAction(
+            action: action,
+            undoAction: undoAction,
+            summary: summary,
+            askedAt: Date()
+        )
+
+        speechController.speak("Confirm \(summary).") { [weak self] in
+            guard let self, self.pendingVoiceAction != nil else { return }
+            self.voiceCaptureController.beginRecordingProgrammatically()
+        }
+
+        pendingVoiceActionTimeout = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(Self.voiceConfirmationWindow))
+            guard !Task.isCancelled else { return }
+            self?.lapsePendingVoiceAction()
+        }
+    }
+
+    /// Yes and no, in both languages Parakeet hands back. Kept as whole
+    /// phrases matched against the entire answer rather than as words
+    /// searched for inside it: "no, move it to done" contains "no" and means
+    /// the opposite of a refusal.
+    private static let confirmPhrases: Set<String> = [
+        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "confirm", "confirmed",
+        "do it", "go ahead", "save it", "correct",
+        "si", "sí", "dale", "confirmo", "confirma", "hazlo", "correcto", "vale",
+    ]
+
+    private static let refusePhrases: Set<String> = [
+        "no", "nope", "cancel", "cancelled", "canceled", "stop", "forget it",
+        "never mind", "nevermind", "wrong",
+        "no gracias", "cancela", "cancelar", "olvidalo", "olvídalo", "para",
+    ]
+
+    /// Answer a standing question. Returns false if the transcript was not an
+    /// answer at all, so the caller can fall through to normal routing.
+    @MainActor
+    private func resolvePendingVoiceAction(with transcript: String) -> Bool {
+        guard let pending = pendingVoiceAction else { return false }
+
+        let answer = transcript
+            .trimmingCharacters(in: CharacterSet(charactersIn: " .,;:!?¡¿"))
+            .lowercased()
+
+        if Self.confirmPhrases.contains(answer) {
+            clearPendingVoiceAction()
+            let outcome = AppActionDispatcher(store: self).perform(pending.action)
+            if case .failed(let reason) = outcome {
+                showVoiceToast(VoiceToast(label: reason, undoAction: nil, isFailure: true))
+            } else {
+                showVoiceToast(VoiceToast(label: pending.summary, undoAction: pending.undoAction))
+            }
+            return true
+        }
+
+        if Self.refusePhrases.contains(answer) {
+            clearPendingVoiceAction()
+            speechController.speak("Cancelled.")
+            voiceLog.insert(
+                VoiceEntry(at: Date(), transcript: transcript,
+                           resolution: "cancelled", didSucceed: false),
+                at: 0
+            )
+            return true
+        }
+
+        // Neither. Treated as a new command rather than a bad answer: the
+        // alternative is arguing with you about a question you have clearly
+        // moved on from.
+        clearPendingVoiceAction()
+        return false
+    }
+
+    @MainActor
+    private func lapsePendingVoiceAction() {
+        guard pendingVoiceAction != nil else { return }
+        clearPendingVoiceAction()
+        voiceLog.insert(
+            VoiceEntry(at: Date(), transcript: "", resolution: "confirmation timed out", didSucceed: false),
+            at: 0
+        )
+    }
+
+    @MainActor
+    private func clearPendingVoiceAction() {
+        pendingVoiceActionTimeout?.cancel()
+        pendingVoiceActionTimeout = nil
+        pendingVoiceAction = nil
+    }
+
     /// The one entry point for spoken input. `VoiceCaptureController` supplies
     /// the transcript, and this routes it to a real agent.
     @MainActor
     func submitVoice(_ transcript: String) {
         let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+
+        // A standing question owns the next thing you say.
+        if resolvePendingVoiceAction(with: trimmed) { return }
 
         // Dictation: a focused editable input means the words were meant for
         // it — type them at the cursor and stop. Anything else is a command.

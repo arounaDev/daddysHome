@@ -152,19 +152,23 @@ struct VoiceRouter {
 
     /// Resolves a kanban intent against live store state and executes it
     /// through `AppActionDispatcher` — the same seam manual clicks use.
-    /// Reversible actions get a toast with Undo; dispatch gets a plain
-    /// confirmation.
+    /// Nothing here performs anything.
+    ///
+    /// A resolved action is read back out loud and held until you say yes —
+    /// see `MockStore.proposeVoiceAction`. Speech recognition is good, not
+    /// perfect, and the gap between "create a task" and "delete a task" is one
+    /// the microphone should not be allowed to close on its own. The toast is
+    /// raised on the answer, not here, so a question you never answer leaves
+    /// no trace of having happened.
     private func routeKanban(_ intent: CommandIntent) -> VoiceOutcome {
         switch VoiceKanbanResolver(store: store).resolve(intent) {
         case .reversible(let action, let confirmLabel, let undoAction):
-            AppActionDispatcher(store: store).perform(action)
-            store.showVoiceToast(VoiceToast(label: confirmLabel, undoAction: undoAction))
-            return .ok(confirmLabel)
+            store.proposeVoiceAction(action, summary: confirmLabel, undoAction: undoAction)
+            return .ok("awaiting confirmation: \(confirmLabel)")
 
         case .irreversible(let action, let confirmLabel):
-            AppActionDispatcher(store: store).perform(action)
-            store.showVoiceToast(VoiceToast(label: confirmLabel, undoAction: nil))
-            return .ok(confirmLabel)
+            store.proposeVoiceAction(action, summary: confirmLabel, undoAction: nil)
+            return .ok("awaiting confirmation: \(confirmLabel)")
 
         case .boardDispatch(let ids, let confirmLabel):
             store.workspace = .board

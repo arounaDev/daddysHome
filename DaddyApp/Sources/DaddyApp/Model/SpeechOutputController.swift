@@ -77,6 +77,14 @@ final class SpeechOutputController: NSObject {
     /// finished synthesizing after it was cancelled never reaches the speaker.
     private var generation = 0
 
+    /// Run when the current line finishes playing of its own accord.
+    ///
+    /// Deliberately *not* run when the line is cut off. The confirmation loop
+    /// hangs the "now reopen the mic" step off this, and reopening the mic
+    /// because the user interrupted Daddy — which is itself what cancels
+    /// playback — would restart the very thing they interrupted.
+    private var onFinishedSpeaking: (() -> Void)?
+
     /// One shared load, started on first use rather than at launch: unlike the
     /// mic — which must be ready the instant you double-tap — nothing speaks
     /// until something happens worth speaking about. The first line therefore
@@ -122,9 +130,14 @@ final class SpeechOutputController: NSObject {
 
     /// A line you asked for. Ignores `mode` — pressing the button is the
     /// answer to "should this be spoken".
-    func speak(_ text: String) {
+    ///
+    /// `then` runs only if the line is spoken all the way through.
+    func speak(_ text: String, then: (() -> Void)? = nil) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty else {
+            then?()
+            return
+        }
 
         // A new line replaces whatever is talking rather than queueing behind
         // it. These are status announcements: the most recent one is the only
@@ -134,6 +147,7 @@ final class SpeechOutputController: NSObject {
         generation += 1
         let generation = self.generation
         isSpeaking = true
+        onFinishedSpeaking = then
 
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -155,6 +169,11 @@ final class SpeechOutputController: NSObject {
                 guard generation == self.generation else { return }
                 self.engineError = String(describing: error)
                 self.isSpeaking = false
+                // The voice failing must not strand the confirmation loop
+                // waiting for a line that will never play.
+                let resume = self.onFinishedSpeaking
+                self.onFinishedSpeaking = nil
+                resume?()
             }
         }
     }
@@ -166,6 +185,7 @@ final class SpeechOutputController: NSObject {
         player?.stop()
         player = nil
         isSpeaking = false
+        onFinishedSpeaking = nil
     }
 
     private func cache(_ wav: Data, for text: String) {
@@ -228,6 +248,9 @@ extension SpeechOutputController: AVAudioPlayerDelegate {
                   ObjectIdentifier(current) == finished else { return }
             self.player = nil
             self.isSpeaking = false
+            let resume = self.onFinishedSpeaking
+            self.onFinishedSpeaking = nil
+            resume?()
         }
     }
 }

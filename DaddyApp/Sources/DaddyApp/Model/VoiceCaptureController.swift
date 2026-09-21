@@ -86,6 +86,15 @@ final class VoiceCaptureController {
         cancelRecording()
     }
 
+    /// Open the mic without the hotkey.
+    ///
+    /// For the confirmation loop: Daddy asks a question out loud and then has
+    /// to listen for the answer, and making you reach for the hotkey to say
+    /// "yes" would defeat the point of having asked.
+    func beginRecordingProgrammatically() {
+        beginRecording()
+    }
+
     // MARK: - Models
 
     private func modelsTask() -> Task<AsrManager, Error> {
