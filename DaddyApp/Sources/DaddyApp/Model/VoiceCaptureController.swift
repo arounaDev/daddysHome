@@ -118,7 +118,7 @@ final class VoiceCaptureController {
                 isDirectory: true
             )
         if FileManager.default.fileExists(atPath: cached.path) {
-            if let models = try? await AsrModels.loadLocal(from: cached, version: .v3) {
+            if let models = try? AsrModels.loadLocal(from: cached, version: .v3) {
                 return models
             }
         }

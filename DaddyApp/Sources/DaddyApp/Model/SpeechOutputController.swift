@@ -61,6 +61,18 @@ final class SpeechOutputController: NSObject {
 
     private var player: AVAudioPlayer?
 
+    /// Rendered audio, keyed by the exact line.
+    ///
+    /// Kokoro costs about 1.7 seconds per call whatever the length — it is a
+    /// seven-model chain, so the overhead is per-call, not per-word. The
+    /// announcements are a handful of fixed sentences said over and over, so
+    /// the second time Daddy says one it should be instant. Bounded because
+    /// an unbounded cache keyed by arbitrary text is a leak: these are short
+    /// WAVs, and the set that actually repeats is tiny.
+    private var clipCache: [String: Data] = [:]
+    private var clipOrder: [String] = []
+    private static let clipCacheLimit = 24
+
     /// Incremented by every `stopSpeaking()` and every new line, so audio that
     /// finished synthesizing after it was cancelled never reaches the speaker.
     private var generation = 0
@@ -126,8 +138,14 @@ final class SpeechOutputController: NSObject {
         Task { @MainActor [weak self] in
             guard let self else { return }
             do {
-                let manager = try await self.kokoroTask().value
-                let wav = try await manager.synthesize(text: trimmed, voice: Self.voice)
+                let wav: Data
+                if let cached = self.clipCache[trimmed] {
+                    wav = cached
+                } else {
+                    let manager = try await self.kokoroTask().value
+                    wav = try await manager.synthesize(text: trimmed, voice: Self.voice)
+                    self.cache(wav, for: trimmed)
+                }
                 guard generation == self.generation else { return }
                 let player = try AVAudioPlayer(data: wav)
                 player.delegate = self
@@ -148,6 +166,40 @@ final class SpeechOutputController: NSObject {
         player?.stop()
         player = nil
         isSpeaking = false
+    }
+
+    private func cache(_ wav: Data, for text: String) {
+        if clipCache[text] == nil {
+            clipOrder.append(text)
+        }
+        clipCache[text] = wav
+        while clipOrder.count > Self.clipCacheLimit {
+            clipCache.removeValue(forKey: clipOrder.removeFirst())
+        }
+    }
+
+    /// Render a line now so the first time it is needed it plays instantly.
+    /// Failures are ignored on purpose: this is an optimisation, and a warm
+    /// cache that did not warm just means the real call pays what it would
+    /// have paid anyway.
+    func prewarm(_ lines: [String]) {
+        // Never the thing that triggers the 107 MB fetch: warming a cache is
+        // not a good enough reason to start a download at launch. If the
+        // models are not on disk yet, the first spoken line pays for them —
+        // which is where the user is already expecting to wait.
+        let cacheRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/fluidaudio/Models/kokoro", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: cacheRoot.path) else { return }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for line in lines where self.clipCache[line] == nil {
+                guard let manager = try? await self.kokoroTask().value,
+                      let wav = try? await manager.synthesize(text: line, voice: Self.voice)
+                else { continue }
+                self.cache(wav, for: line)
+            }
+        }
     }
 
     private func kokoroTask() -> Task<KokoroAneManager, Error> {

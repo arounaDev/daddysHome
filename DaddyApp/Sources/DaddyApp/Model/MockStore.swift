@@ -1224,11 +1224,17 @@ final class MockStore {
                     break
                 case (_, .ready):
                     signalReadyIfNeeded(agent.id)
-                    announce("\(agent.displayName) requires input.", event: .agentIdle)
+                    announceFinishedIfEarned(agent.id, previous: oldState)
                 case (.ready, _):
                     forgetReadyAttention(agent.id)
                 default:
                     break
+                }
+
+                if case .working = newState {
+                    if case .working = oldState {} else {
+                        workingSince[agent.id] = Date()
+                    }
                 }
             }
 
@@ -1325,6 +1331,37 @@ final class MockStore {
             }
         }
         updateDockBadge()
+    }
+
+    /// When each agent last started working, so "it finished" can be told
+    /// apart from "the screen redrew".
+    @ObservationIgnored private var workingSince: [String: Date] = [:]
+
+    /// Speak only for a session that actually finished something.
+    ///
+    /// Two filters, both learned the hard way. The state has to have come
+    /// *from* `.working`: state is detected from the rendered screen, so a
+    /// composer repaint — pasting a transcript into it, say — bounces an idle
+    /// agent out of `.ready` and back, and every one of those round trips
+    /// looked like "the agent finished" to the first version of this. And the
+    /// work has to have lasted `minimumWork`, because a repaint that happens
+    /// to flicker through `.working` is not a response either.
+    ///
+    /// The dock badge shares the first problem and gets away with it: it only
+    /// fires while Daddy is in the background, where nobody sees it bounce.
+    /// A voice has no such cover.
+    private func announceFinishedIfEarned(_ agentID: String, previous: AgentState) {
+        let minimumWork: TimeInterval = 3
+        guard case .working = previous else {
+            workingSince[agentID] = nil
+            return
+        }
+        guard let since = workingSince.removeValue(forKey: agentID),
+              Date().timeIntervalSince(since) >= minimumWork,
+              let agent = agents.first(where: { $0.id == agentID })
+        else { return }
+
+        announce("\(agent.displayName) is done.", event: .agentIdle)
     }
 
     private func forgetReadyAttention(_ agentID: String) {

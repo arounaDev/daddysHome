@@ -318,7 +318,7 @@ struct WorkspaceRail: View {
                     ForEach(store.previewRootProjects) { project in
                         Button(action: {
                             withAnimation(.smooth(duration: 0.3)) {
-                                store.select(project: project.id)
+                                _ = AppActionDispatcher(store: store).perform(.openProject(projectID: project.id))
                             }
                         }) {
                             Circle()

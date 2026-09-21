@@ -410,7 +410,7 @@ struct BoardView: View {
                     applyScope(.project(project.id))
                     // The rail and the board share one idea of "the project
                     // you are in", so picking here follows you back to Fleet.
-                    store.select(project: project.id)
+                    _ = AppActionDispatcher(store: store).perform(.openProject(projectID: project.id))
                 }
             },
             width: 240

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import DaddyCore
 
 struct RootView: View {
     @Environment(MockStore.self) private var store
@@ -145,6 +146,13 @@ struct RootView: View {
             // Global monitors must register after first render: doing it in
             // MockStore.init (pre-activation) wedges all app input.
             store.voiceCaptureController.start()
+
+            // The announcements are four fixed sentences. Rendering them now
+            // means the first "CLAUDE is done." plays the instant it is true,
+            // rather than a second and a half after.
+            store.speechController.prewarm(
+                AgentKind.allCases.map { "\($0.rawValue.uppercased()) is done." }
+            )
         }
         .onDisappear { removeKeyboardMonitor() }
         .task {

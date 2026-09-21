@@ -1,6 +1,6 @@
 import Foundation
 
-public enum AgentKind: String, Codable, Sendable {
+public enum AgentKind: String, Codable, Sendable, CaseIterable {
     case claude
     case codex
     case cursor

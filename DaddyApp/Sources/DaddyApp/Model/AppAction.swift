@@ -15,6 +15,40 @@ enum AppAction {
     case dispatchBundleOntoAgent(workItemIDs: [UUID], agentID: String)
     case dispatchBundleLaunchingAgent(workItemIDs: [UUID], kind: AgentKind)
     case launchSession(kind: AgentKind, projectID: String)
+    case openProject(projectID: String)
+
+    /// A stable identifier for the action, independent of its parameters.
+    ///
+    /// Snake case and spelled out rather than derived from the case name,
+    /// because this is the vocabulary a language model will be handed in
+    /// step 4 — it has to stay put when a case is renamed, and it has to read
+    /// as an instruction rather than as Swift.
+    var name: String {
+        switch self {
+        case .createWorkItem: return "create_work_item"
+        case .moveWorkItem: return "move_work_item"
+        case .replaceWorkItem: return "replace_work_item"
+        case .deleteWorkItem: return "delete_work_item"
+        case .dispatchOntoAgent: return "dispatch_onto_agent"
+        case .dispatchLaunchingAgent: return "dispatch_launching_agent"
+        case .dispatchBundleOntoAgent: return "dispatch_bundle_onto_agent"
+        case .dispatchBundleLaunchingAgent: return "dispatch_bundle_launching_agent"
+        case .launchSession: return "launch_session"
+        case .openProject: return "open_project"
+        }
+    }
+
+    /// Whether performing this needs a yes first. Only deletion qualifies
+    /// today: everything else is either additive or carries an Undo on its
+    /// toast. Read by the voice layer in step 4, and deliberately a property
+    /// of the action rather than of the call site, so a new trigger cannot
+    /// forget to ask.
+    var isDestructive: Bool {
+        switch self {
+        case .deleteWorkItem: return true
+        default: return false
+        }
+    }
 }
 
 /// A brief on-screen confirmation for a voice-triggered action. `undoAction`
@@ -42,6 +76,7 @@ enum AppActionOutcome {
     case dispatched(item: OrchestratorWorkItem, agent: MockAgent)
     case bundleDispatched(items: [OrchestratorWorkItem], agent: MockAgent)
     case sessionLaunched(MockAgent)
+    case projectOpened(MockProject)
     case failed(String)
 }
 
@@ -134,6 +169,18 @@ struct AppActionDispatcher {
             // sessions, and neither should pull you out of what you were doing.
             store.openDetail(agent.id)
             return .sessionLaunched(agent)
+
+        case .openProject(let projectID):
+            guard let project = store.project(projectID) else {
+                return .failed("That project is no longer available")
+            }
+            // Only the store-level meaning of "open a project" belongs here.
+            // The sidebar also selects the row in its own tree and animates a
+            // disclosure open; both are view-local bookkeeping that a voice
+            // command has no business triggering, so they stay at the call
+            // site rather than becoming part of the action.
+            store.select(project: project.id)
+            return .projectOpened(project)
         }
     }
 }

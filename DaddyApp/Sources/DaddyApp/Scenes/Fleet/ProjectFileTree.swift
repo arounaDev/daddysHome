@@ -39,7 +39,7 @@ struct ProjectFileTree: View {
                     onSelectProject: { path in
                         guard let project = store.project(path) else { return }
                         withAnimation(.smooth(duration: 0.3)) {
-                            store.select(project: project.id)
+                            _ = AppActionDispatcher(store: store).perform(.openProject(projectID: project.id))
                         }
                     }
                 )

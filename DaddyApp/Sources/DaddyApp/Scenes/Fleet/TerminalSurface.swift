@@ -522,11 +522,17 @@ struct TerminalSurface: NSViewRepresentable {
         /// when it is first made.
         @MainActor
         private func takeKeyboardFocus(_ view: TerminalView) {
-            let hop = { [weak view] in
-                MainActor.assumeIsolated {
-                    guard let view, view.window != nil else { return }
-                    view.window?.makeFirstResponder(view)
-                }
+            // Spelled out as `@MainActor @Sendable` rather than left to
+            // inference. That is exactly the type `DispatchQueue.main`'s
+            // `execute:` takes, and an inferred closure is neither, so every
+            // hand-off warned about a data race that was not there — the body
+            // only ever ran on main. Declaring the type also makes the
+            // `MainActor.assumeIsolated` wrapper that used to be inside
+            // unnecessary: the closure is isolated now, not merely asserting
+            // that it is.
+            let hop: @MainActor @Sendable () -> Void = { [weak view] in
+                guard let view, view.window != nil else { return }
+                view.window?.makeFirstResponder(view)
             }
             DispatchQueue.main.async(execute: hop)
             // Board cover is gone on the next turn; one hop is sometimes still

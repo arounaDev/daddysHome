@@ -104,7 +104,7 @@ struct ProjectsSection: View {
                 fileTree.select(project.path)
                 withAnimation(.smooth(duration: 0.3)) {
                     setExpanded(project, !isTreeExpanded)
-                    store.select(project: project.id)
+                    _ = AppActionDispatcher(store: store).perform(.openProject(projectID: project.id))
                 }
             }
             .modifier(
@@ -152,7 +152,7 @@ struct ProjectsSection: View {
                             TreeKeyboard.claim()
                             fileTree.select(child.path)
                             withAnimation(.smooth(duration: 0.3)) {
-                                store.select(project: child.id)
+                                _ = AppActionDispatcher(store: store).perform(.openProject(projectID: child.id))
                             }
                         }
                         .padding(.leading, 20)
