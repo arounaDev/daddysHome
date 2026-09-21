@@ -223,6 +223,21 @@ final class MockStore {
     /// `VoiceCaptureController.swift`.
     @ObservationIgnored let voiceCaptureController = VoiceCaptureController()
 
+    /// Daddy's own voice. See `SpeechOutputController.swift`.
+    let speechController = SpeechOutputController()
+
+    /// Speak an automatic line, unless the mic is open.
+    ///
+    /// The mic check is the other half of the barge-in wired up in `init`:
+    /// that one stops Daddy talking when you start, this one stops Daddy
+    /// starting while you talk. Dropped rather than queued — these are status
+    /// lines, and one that arrives after the moment it described has passed
+    /// is worse than one you never hear.
+    func announce(_ text: String, event: SpeechEvent) {
+        guard voiceCaptureController.state == .idle else { return }
+        speechController.announce(text, event: event)
+    }
+
     /// Surfaced in the UI when a launch fails (missing binary, bad cwd).
     var launchError: String?
 
@@ -271,6 +286,9 @@ final class MockStore {
 
         voiceCaptureController.onTranscript = { [weak self] transcript in
             self?.submitVoice(transcript)
+        }
+        voiceCaptureController.onWillStartRecording = { [weak self] in
+            self?.speechController.stopSpeaking()
         }
         // Note: the controller starts from RootView.onAppear, not here —
         // registering global NSEvent monitors pre-activation wedges all
@@ -1206,6 +1224,7 @@ final class MockStore {
                     break
                 case (_, .ready):
                     signalReadyIfNeeded(agent.id)
+                    announce("\(agent.displayName) requires input.", event: .agentIdle)
                 case (.ready, _):
                     forgetReadyAttention(agent.id)
                 default:

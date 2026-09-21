@@ -20,6 +20,8 @@ enum Defaults {
         case userShellCollapsed = "daddy.userShellCollapsed"
         case driveConnected = "daddy.driveConnected"
         case driveAccountEmail = "daddy.driveAccountEmail"
+        case speechMode = "daddy.speechMode"
+        case speechEvents = "daddy.speechEvents"
     }
 
     static func set(_ value: String, for key: Key) {

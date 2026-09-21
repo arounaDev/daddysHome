@@ -66,6 +66,13 @@ final class VoiceCaptureController {
     /// (not cancelled). The caller resolves and executes it.
     var onTranscript: ((String) -> Void)?
 
+    /// Fired the instant the mic is about to open, before the tap is
+    /// installed. Daddy's own voice is cut off here: anything still playing
+    /// out of the speakers would otherwise be recorded and transcribed back,
+    /// and the app would answer itself. Barge-in rather than a wait, because
+    /// hitting the hotkey mid-sentence means you want to talk now.
+    var onWillStartRecording: (() -> Void)?
+
     func start() {
         hotkeyMonitor.onDoubleTap = { [weak self] in self?.beginRecording() }
         hotkeyMonitor.onSingleTapWhileActive = { [weak self] in self?.handleTapWhileActive() }
@@ -133,6 +140,7 @@ final class VoiceCaptureController {
     private func startEngine() {
         guard state == .idle else { return }
 
+        onWillStartRecording?()
         _ = accumulator.drain()
 
         let inputNode = audioEngine.inputNode

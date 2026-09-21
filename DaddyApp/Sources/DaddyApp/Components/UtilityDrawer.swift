@@ -255,6 +255,49 @@ private struct SettingsUtilityPanel: View {
                     }
                 }
 
+                section("VOICE") {
+                    setting(
+                        "Speaking",
+                        store.speechController.mode == .off
+                            ? "Daddy stays silent unless you press Test."
+                            : "Daddy speaks the events switched on below."
+                    ) {
+                        Picker("", selection: Binding(
+                            get: { store.speechController.mode },
+                            set: { store.speechController.mode = $0 }
+                        )) {
+                            ForEach(SpeechMode.allCases, id: \.self) { mode in
+                                Text(mode.label.lowercased()).tag(mode)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                    }
+
+                    toggleSetting(
+                        "Say when an agent needs you",
+                        "Spoken the moment a session goes idle.",
+                        binding: speechEvent(.agentIdle)
+                    )
+
+                    toggleSetting(
+                        "Say confirmations",
+                        "Reads out what a voice command just did.",
+                        binding: speechEvent(.actionConfirmed)
+                    )
+
+                    toggleSetting(
+                        "Say failures",
+                        "Reads out why a voice command did nothing.",
+                        binding: speechEvent(.actionFailed)
+                    )
+
+                    Button("Test voice") {
+                        store.speechController.speak("Daddy here. The voice is working.")
+                    }
+                    .controlSize(.small)
+                }
+
                 section("SHORTCUTS") {
                     VStack(alignment: .leading, spacing: 10) {
                         // Folded away by default. The list is reference
@@ -461,6 +504,15 @@ private struct SettingsUtilityPanel: View {
                 .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// The per-event switches live in a `Set` on the controller rather than as
+    /// three stored properties, so each one needs a binding built by hand.
+    private func speechEvent(_ event: SpeechEvent) -> Binding<Bool> {
+        Binding(
+            get: { store.speechController.isEnabled(event) },
+            set: { store.speechController.setEnabled($0, for: event) }
+        )
     }
 
     private func toggleSetting(

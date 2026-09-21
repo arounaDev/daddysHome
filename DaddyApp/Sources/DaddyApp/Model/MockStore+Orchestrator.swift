@@ -519,6 +519,10 @@ extension MockStore {
     func showVoiceToast(_ toast: VoiceToast) {
         voiceToastDismissTask?.cancel()
         voiceToast = toast
+        // Every action confirmation and every refusal already passes through
+        // here on its way to the screen, so this is the one place the spoken
+        // version has to hook in to cover both.
+        announce(toast.label, event: toast.isFailure ? .actionFailed : .actionConfirmed)
         voiceToastDismissTask = Task {
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled else { return }

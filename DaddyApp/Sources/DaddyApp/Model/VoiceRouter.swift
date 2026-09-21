@@ -173,7 +173,7 @@ struct VoiceRouter {
             return .ok(confirmLabel)
 
         case .failed(let reason):
-            store.showVoiceToast(VoiceToast(label: reason, undoAction: nil))
+            store.showVoiceToast(VoiceToast(label: reason, undoAction: nil, isFailure: true))
             return .refused(reason)
         }
     }

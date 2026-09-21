@@ -26,6 +26,11 @@ struct VoiceToast: Identifiable {
     /// SF Symbol shown beside the label. Voice-triggered toasts default to the
     /// waveform; non-voice ones (e.g. a keyboard delete) pass `nil` to omit it.
     var icon: String? = "waveform"
+    /// True when the label explains why nothing happened, rather than
+    /// confirming that something did. Only the spoken layer reads it so far —
+    /// the two are announced as separate events, because wanting to hear your
+    /// confirmations and wanting to hear your failures are different wants.
+    var isFailure = false
 }
 
 enum AppActionOutcome {
