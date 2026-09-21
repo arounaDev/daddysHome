@@ -56,6 +56,15 @@ public protocol AgentAdapter: AnyObject {
     /// carried by `AGENTS.md` and by an explicit switch message.
     func systemPromptArgs(_ text: String) -> [String]?
 
+    /// Arguments that enforce as much of `policy` as this CLI can express.
+    ///
+    /// A work mode is a budget, and the half of it that can be a flag should
+    /// be a flag. Saying "use no subagents" in a system prompt is a request;
+    /// denying the editing tools at launch is not. Each CLI can express a
+    /// different amount of it, so what this cannot enforce falls through to
+    /// `SessionPolicy.promptClause` and is merely said.
+    func policyArgs(_ policy: ModePolicy) -> [String]
+
     /// Whether this CLI lets the caller choose the conversation's id before it
     /// starts.
     ///
@@ -97,6 +106,10 @@ extension AgentAdapter {
 
     /// Most CLIs have no way to append to their system prompt.
     public func systemPromptArgs(_ text: String) -> [String]? { nil }
+
+    /// A CLI that cannot express any of it enforces none of it. The policy
+    /// still reaches the agent as prompt text; it just has nothing behind it.
+    public func policyArgs(_ policy: ModePolicy) -> [String] { [] }
 
     /// The plain form, for callers with no opinion about history.
     public func launchArgs(
@@ -152,6 +165,37 @@ public final class ClaudeAdapter: AgentAdapter {
     /// From `claude --help`: `--append-system-prompt <prompt>`.
     public func systemPromptArgs(_ text: String) -> [String]? {
         ["--append-system-prompt", text]
+    }
+
+    /// Claude expresses more of a mode policy as flags than any of the others.
+    ///
+    /// From `claude --help`:
+    ///   `--effort <level>` (low, medium, high, xhigh, max)
+    ///   `--disallowedTools <tools...>` — comma or space separated
+    ///   `--strict-mcp-config` — ignore every MCP configuration but `--mcp-config`
+    public func policyArgs(_ policy: ModePolicy) -> [String] {
+        var args = ["--effort", policy.effort.rawValue]
+
+        if policy.deniesEditingTools {
+            // Comma-separated in a single argument, not three separate ones.
+            // The flag is variadic, so spelled as separate argv entries it
+            // would swallow whichever flag came after it — and a swallowed
+            // `--session-id` is a card that has lost its conversation.
+            //
+            // These three names are checked against the installed CLI, which
+            // warns on the terminal for a name it does not know — in a window
+            // the human is watching, a typo here is visible noise as well as a
+            // denial that silently does nothing.
+            args += ["--disallowedTools", "Edit,Write,NotebookEdit"]
+        }
+
+        if policy.toolProfile == .minimal {
+            // No `--mcp-config` accompanies this, so it resolves to no MCP
+            // servers at all — built-in tools only, which is the point.
+            args.append("--strict-mcp-config")
+        }
+
+        return args
     }
 
     public init() {}
@@ -294,6 +338,23 @@ public final class CodexAdapter: AgentAdapter {
         return args
     }
 
+    /// Codex has no flag for any of this, but it has `-c key=value`, which
+    /// overrides the same keys `~/.codex/config.toml` sets.
+    ///
+    /// The value is parsed as TOML and the quotes are part of the argument,
+    /// not shell punctuation — nothing here goes through a shell, so they have
+    /// to be written literally. This is the form `codex --help` documents
+    /// (`-c model="o3"`). The bare word is also accepted by the installed CLI,
+    /// but so is every other string: Codex validates neither the key nor the
+    /// value, which means a wrong one here fails silently rather than loudly.
+    /// Spelled the documented way for that reason.
+    ///
+    /// Tool scope and read-only have no equivalent; they fall through to the
+    /// prompt clause.
+    public func policyArgs(_ policy: ModePolicy) -> [String] {
+        ["-c", "model_reasoning_effort=\"\(policy.effort.rawValue)\""]
+    }
+
     public func modelFlagValue(for humanName: String) -> String? {
         humanName.lowercased().trimmingCharacters(in: .whitespaces)
     }
@@ -356,6 +417,21 @@ public final class CursorAdapter: AgentAdapter {
         return args
     }
 
+    /// From `agent --help`: `--mode <mode>` takes `plan` or `ask`, both of
+    /// which are read-only.
+    ///
+    /// Only the read-only half maps, and only when the session asked for it to
+    /// be enforced — see `ModePolicy.enforcesReadOnly`, which is off by
+    /// default. `--mode plan` looks like the obvious home
+    /// for Plan & Build and is the wrong one — Cursor's plan mode never writes,
+    /// and Plan & Build has to write once the plan is agreed. Effort is
+    /// expressible only inside a parameterised model string
+    /// (`claude-opus-4-8[effort=high]`), and rewriting the model the human
+    /// picked to smuggle it in is worse than not having it.
+    public func policyArgs(_ policy: ModePolicy) -> [String] {
+        policy.deniesEditingTools ? ["--mode", "ask"] : []
+    }
+
     public func modelFlagValue(for humanName: String) -> String? {
         humanName.lowercased().trimmingCharacters(in: .whitespaces)
     }
@@ -409,6 +485,15 @@ public final class OpenCodeAdapter: AgentAdapter {
         }
 
         return args
+    }
+
+    /// `opencode agent list` ships a primary `plan` agent that is read-only,
+    /// which is the only part of a mode policy this CLI can be told at launch —
+    /// and only when the session opted into enforcing it.
+    /// Effort and tool scope belong to the agent definition rather than the
+    /// command line, so they fall through to the prompt clause.
+    public func policyArgs(_ policy: ModePolicy) -> [String] {
+        policy.deniesEditingTools ? ["--agent", "plan"] : []
     }
 
     public func modelFlagValue(for humanName: String) -> String? {

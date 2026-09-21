@@ -134,7 +134,8 @@ public final class SessionManager: @unchecked Sendable {
         approvalPolicy: ApprovalPolicy = .safeAuto,
         continuingConversation: Bool = false,
         workMode: WorkMode = .default,
-        buildPolicy: BuildPolicy = .default
+        buildPolicy: BuildPolicy = .default,
+        contract: TaskContract? = nil
     ) throws {
         guard let adapter = adapters[session.agent] else {
             throw SessionError.unknownAgent(session.agent)
@@ -150,6 +151,17 @@ public final class SessionManager: @unchecked Sendable {
 
         session.workMode = workMode
         session.buildPolicy = buildPolicy
+        if let contract { session.contract = contract }
+
+        // A relaunch starts the work over, so whatever the last run proved is
+        // a statement about a process that no longer exists.
+        session.verification = Verification(
+            profile: SessionPolicy(
+                workMode: workMode,
+                buildPolicy: buildPolicy,
+                enforceReadOnly: session.enforcesReadOnly
+            ).verification
+        )
 
         let execPath = type(of: adapter).executablePath
         var args = adapter.launchArgs(
@@ -159,15 +171,42 @@ public final class SessionManager: @unchecked Sendable {
             resumption: resumption
         )
 
+        // The half of the policy this CLI can enforce goes on as flags —
+        // effort, denied editing tools, MCP scope. That half is not a request
+        // the agent can talk itself out of halfway through a long session,
+        // which is the entire reason to prefer it over prose.
+        //
+        // Appended after `launchArgs`, which for Codex ends in a positional
+        // session id. Safe because every flag these emit starts with a dash
+        // and so cannot be mistaken for Codex's trailing PROMPT positional —
+        // but it is the reason `ClaudeAdapter` comma-joins its variadic
+        // `--disallowedTools` value instead of spelling it as separate
+        // arguments, which would swallow whatever came next.
+        let policy = SessionPolicy(
+            workMode: workMode,
+            buildPolicy: buildPolicy,
+            enforceReadOnly: session.enforcesReadOnly
+        )
+        args += adapter.policyArgs(policy.mode)
+
         // Plan & Build and Compile are the contract's own defaults, so they
         // inject nothing — and a CLI with no system-prompt flag gets both from
         // AGENTS.md instead, which is why that file has to define them.
         //
-        // One combined injection rather than two: an adapter's system-prompt
+        // The budget clause carries what no flag can: subagents, plan
+        // approval, the retry cap, and what "done" has to mean here. It comes
+        // last so it reads as the qualifier on the mode named above it.
+        //
+        // One combined injection rather than four: an adapter's system-prompt
         // flag is not guaranteed to be repeatable, and the second one silently
         // replacing the first is the kind of bug that only shows up as an
         // agent ignoring a policy you know you set.
-        let launchPrompt = [workMode.systemPrompt, buildPolicy.systemPrompt]
+        let launchPrompt = [
+            workMode.systemPrompt,
+            buildPolicy.systemPrompt,
+            policy.promptClause,
+            session.contract?.promptClause
+        ]
             .compactMap { $0 }
             .joined(separator: "\n\n")
         if !launchPrompt.isEmpty,
@@ -251,6 +290,7 @@ public final class SessionManager: @unchecked Sendable {
         defer { lock.unlock() }
         sessions[sessionID]?.workMode = mode
         sessions[sessionID]?.lastOutputAt = Date()
+        retargetVerificationLocked(sessionID)
     }
 
     /// Change a running session's build policy. Pasted, for the same reason
@@ -263,6 +303,102 @@ public final class SessionManager: @unchecked Sendable {
         defer { lock.unlock() }
         sessions[sessionID]?.buildPolicy = policy
         sessions[sessionID]?.lastOutputAt = Date()
+        retargetVerificationLocked(sessionID)
+    }
+
+    /// Move a session's verification to whatever its mode and build policy
+    /// now demand. Caller holds the lock; the name says so because this file
+    /// has already deadlocked once on an `NSLock` that is not recursive.
+    private func retargetVerificationLocked(_ sessionID: String) {
+        guard let session = sessions[sessionID] else { return }
+        session.verification.retarget(to: session.policy.verification)
+    }
+
+    // MARK: - Task contract
+
+    /// Give a running session its goal, or change it.
+    ///
+    /// Sent as well as stored. The stored copy is what the card and a later
+    /// relaunch read; the sent copy is what the agent is actually working to.
+    /// Storing without sending would give you a card that displays a goal the
+    /// agent has never been told.
+    public func setContract(_ contract: TaskContract, for sessionID: String) throws {
+        lock.lock()
+        guard let session = sessions[sessionID] else {
+            lock.unlock()
+            throw SessionError.sessionNotFound(sessionID)
+        }
+        session.contract = contract
+        lock.unlock()
+
+        guard let clause = contract.promptClause else { return }
+        let (pty, adapter) = try liveSession(sessionID)
+        // Pasted rather than sent, for the same reason the mode switches are:
+        // setting a goal and then typing the first instruction should leave on
+        // one Enter, not as two messages the agent answers separately.
+        try adapter.pastePrompt(clause + "\n\n", to: pty)
+    }
+
+    public func contract(for sessionID: String) -> TaskContract? {
+        lock.lock()
+        defer { lock.unlock() }
+        return sessions[sessionID]?.contract
+    }
+
+    // MARK: - Verification
+
+    /// Record what a check actually did.
+    ///
+    /// There is no `setVerified(true)` anywhere in this API, and that is the
+    /// design. `passed` is reachable only by handing this an exit code, which
+    /// means some process ran and returned it — not by anyone, agent or UI,
+    /// deciding the work looks done.
+    ///
+    /// `summary` is for the card to display and never decides the outcome.
+    @discardableResult
+    public func recordVerification(
+        exitCode: Int32,
+        command: String?,
+        summary: String? = nil,
+        for sessionID: String
+    ) throws -> Verification {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let session = sessions[sessionID] else {
+            throw SessionError.sessionNotFound(sessionID)
+        }
+        session.verification.record(exitCode: exitCode, command: command, summary: summary)
+        return session.verification
+    }
+
+    /// Mark a check as in flight, so a card can say "verifying" rather than
+    /// showing the previous run's result as though it still applied.
+    public func beginVerification(command: String?, for sessionID: String) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let session = sessions[sessionID] else {
+            throw SessionError.sessionNotFound(sessionID)
+        }
+        session.verification.markRunning(command: command)
+    }
+
+    /// Call when the working tree moves after a pass.
+    ///
+    /// Daddy does not watch the filesystem, so this is the caller's to invoke
+    /// — from a diff refresh, a commit, or the next prompt sent into a session
+    /// that had already gone green. Without it, "Verified" degrades into "was
+    /// verified at some point", which is worse than no badge at all because it
+    /// still looks like an answer.
+    public func invalidateVerification(for sessionID: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        sessions[sessionID]?.verification.invalidate()
+    }
+
+    public func verification(for sessionID: String) -> Verification? {
+        lock.lock()
+        defer { lock.unlock() }
+        return sessions[sessionID]?.verification
     }
 
     /// Internal, for tests: the resume decision without launching anything.

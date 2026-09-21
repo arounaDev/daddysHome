@@ -52,6 +52,14 @@ public final class WorkflowState: Codable {
         public let createdAt: Date
         public var lastActivityAt: Date
 
+        /// What the session was for. Survives a relaunch, which is the whole
+        /// point: the goal outlives the conversation that was pursuing it.
+        public var contract: TaskContract?
+
+        /// Whether anything outside the agent had confirmed the work when this
+        /// was last written.
+        public var verification: Verification?
+
         public init(
             id: String,
             projectID: String,
@@ -60,7 +68,9 @@ public final class WorkflowState: Codable {
             model: ModelRef?,
             agentState: AgentState,
             createdAt: Date,
-            lastActivityAt: Date
+            lastActivityAt: Date,
+            contract: TaskContract? = nil,
+            verification: Verification? = nil
         ) {
             self.id = id
             self.projectID = projectID
@@ -70,12 +80,15 @@ public final class WorkflowState: Codable {
             self.agentState = agentState
             self.createdAt = createdAt
             self.lastActivityAt = lastActivityAt
+            self.contract = contract
+            self.verification = verification
         }
 
         enum CodingKeys: String, CodingKey {
             case id, projectID, workUnitID, agent, model
             case agentState = "state"
             case createdAt, lastActivityAt
+            case contract, verification
         }
 
         public init(from decoder: Decoder) throws {
@@ -88,6 +101,12 @@ public final class WorkflowState: Codable {
             agentState = try container.decode(AgentState.self, forKey: .agentState)
             createdAt = try container.decode(Date.self, forKey: .createdAt)
             lastActivityAt = try container.decode(Date.self, forKey: .lastActivityAt)
+            // Optional on the way in, not just in the type: every state file
+            // written before these existed has neither key, and a `decode`
+            // here would make the whole workflow fail to load rather than one
+            // session come back without a goal.
+            contract = try container.decodeIfPresent(TaskContract.self, forKey: .contract)
+            verification = try container.decodeIfPresent(Verification.self, forKey: .verification)
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -100,6 +119,8 @@ public final class WorkflowState: Codable {
             try container.encode(agentState, forKey: .agentState)
             try container.encode(createdAt, forKey: .createdAt)
             try container.encode(lastActivityAt, forKey: .lastActivityAt)
+            try container.encodeIfPresent(contract, forKey: .contract)
+            try container.encodeIfPresent(verification, forKey: .verification)
         }
     }
 

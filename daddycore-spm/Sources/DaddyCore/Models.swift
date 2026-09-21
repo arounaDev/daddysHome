@@ -130,6 +130,32 @@ public final class Session: Identifiable {
     /// the card should show what its agent is actually operating under.
     public var buildPolicy: BuildPolicy = .default
 
+    /// What this session is for and when it is finished.
+    ///
+    /// Nil for a session started without one — a card opened to poke around
+    /// does not need a contract, and demanding one before anything can run
+    /// would make the cheap case expensive.
+    public var contract: TaskContract?
+
+    /// Whether anything other than the agent has confirmed the work.
+    ///
+    /// Separate from `state` deliberately. `state` knows whether the process
+    /// is busy; this knows whether the result stood up to something. A session
+    /// can be idle and unverified, which is the most common way work is
+    /// quietly wrong.
+    public var verification: Verification = Verification(profile: BuildPolicy.default.verification)
+
+    /// The mode, the build policy and their resolved consequences.
+    public var policy: SessionPolicy {
+        SessionPolicy(workMode: workMode, buildPolicy: buildPolicy, enforceReadOnly: enforcesReadOnly)
+    }
+
+    /// Whether a non-editing mode should have its editing tools taken away at
+    /// launch rather than merely being asked not to use them.
+    ///
+    /// Off unless the session asks. See `ModePolicy.enforcesReadOnly`.
+    public var enforcesReadOnly: Bool = false
+
     public init(
         id: String = UUID().uuidString,
         projectID: String,
