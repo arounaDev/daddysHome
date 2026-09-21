@@ -10,8 +10,7 @@ import Foundation
 /// read per tick, forever, whether or not anything moved.
 ///
 /// A kqueue on the directory's own descriptor costs nothing until the kernel
-/// has something to say. `HEXWatcher` watches its transcript file the same way
-/// and for the same reason.
+/// has something to say.
 ///
 /// One watcher per **expanded** directory, so the number of open descriptors is
 /// bounded by what is actually on screen. `FileTreeStore` cancels them as

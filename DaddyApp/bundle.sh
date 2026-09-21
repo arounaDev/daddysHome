@@ -79,7 +79,8 @@ cat > "${APP}/Contents/Info.plist" <<PLIST
     <key>NSSupportsAutomaticTermination</key><false/>
     <key>NSSupportsSuddenTermination</key>   <false/>
     <key>NSMicrophoneUsageDescription</key>  <string>Daddy listens when you double-tap Option so you can add and manage Kanban cards by voice.</string>
-    <key>NSSpeechRecognitionUsageDescription</key><string>Daddy transcribes your voice on-device to turn it into Kanban actions.</string>
+    <!-- No NSSpeechRecognitionUsageDescription: transcription is Parakeet running
+         in-process via FluidAudio, which never calls Apple's speech service. -->
 </dict>
 </plist>
 PLIST

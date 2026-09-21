@@ -145,14 +145,6 @@ struct RootView: View {
             // Global monitors must register after first render: doing it in
             // MockStore.init (pre-activation) wedges all app input.
             store.voiceCaptureController.start()
-
-            // Deferred past first paint. Hex's container read can raise a
-            // permission dialog, and one appearing while the window is still
-            // arriving takes focus away from it for good.
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(900))
-                store.startHexWatcher()
-            }
         }
         .onDisappear { removeKeyboardMonitor() }
         .task {

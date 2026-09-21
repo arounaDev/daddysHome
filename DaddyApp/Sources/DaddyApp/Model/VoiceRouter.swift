@@ -113,9 +113,16 @@ struct VoiceRouter {
 
         case .unknown:
             // A sentence with no recognised command word is almost always just
-            // something to say to the agent. Sending it beats discarding it.
-            store.send(trimmed, to: target.id)
-            return .ok("sent to \(target.displayName): \(trimmed)")
+            // something to say to the agent. Pasting it beats discarding it.
+            //
+            // Pasted, not sent: this is the one path where the words are a
+            // raw transcript rather than a command anyone matched on, so it
+            // is also the one most likely to have come out wrong. Leaving it
+            // in the composer costs a keystroke and buys the chance to read
+            // it first. The command cases above still submit — you said a
+            // command word, you meant it to run.
+            store.paste(trimmed, to: target.id)
+            return .ok("pasted to \(target.displayName): \(trimmed)")
         }
     }
 
