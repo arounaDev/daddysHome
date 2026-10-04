@@ -295,8 +295,7 @@ struct AgentDetailHeader: View {
             },
             GlassDropdownItem(
                 id: "shell",
-                title: store.userShellCollapsed ? "Show your shell" : "Hide your shell",
-                note: "⌘T"
+                title: store.userShellCollapsed ? "Show your shell" : "Hide your shell"
             ) {
                 store.userShellCollapsed.toggle()
             },

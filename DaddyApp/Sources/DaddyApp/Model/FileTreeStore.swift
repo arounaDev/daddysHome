@@ -128,6 +128,29 @@ final class FileTreeStore {
         reload(path)
     }
 
+    /// Replace the expansion wholesale.
+    ///
+    /// Tab switches land here: each project tab remembers the folders it had
+    /// open, and the tree has to forget all of it and remember that set in one
+    /// move. Like `collapse`, the watchers stop but the listings stay cached,
+    /// so switching back is instant.
+    func applyExpansion(_ paths: Set<String>) {
+        guard expanded != paths else { return }
+
+        for path in expanded.subtracting(paths) {
+            watchers[path] = nil
+            reloadTasks[path]?.cancel()
+            reloadTasks[path] = nil
+        }
+
+        expanded = paths
+
+        for path in paths {
+            watch(path)
+            if children[path] == nil { reload(path) }
+        }
+    }
+
     func collapse(_ path: String) {
         guard expanded.contains(path) else { return }
 

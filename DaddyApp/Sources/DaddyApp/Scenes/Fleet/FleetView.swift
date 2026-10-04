@@ -39,6 +39,8 @@ struct FleetView: View {
     @State private var sidebarHoverEnabled = true
     @State private var hoverRestoreTask: Task<Void, Never>?
     @State private var providerLaunchOpen = false
+    /// The `+` picker on the tab strip. State, not a `Menu`, so ⌘T can open it.
+    @State private var newTabPickerOpen = false
     /// `store.userShellCollapsed`, but lagged by the shell's own exit
     /// animation when it is going away. Reopening still shrinks the terminal
     /// instantly — the shell then slides into space already vacated, which
@@ -90,7 +92,12 @@ struct FleetView: View {
     private var isDetail: Bool { store.detailAgent != nil }
 
     var body: some View {
-        GeometryReader { geo in
+        VStack(spacing: 8) {
+            // The projects, and the one currently on screen. Below it, the
+            // rail, agents and terminals all scope to that tab.
+            ProjectTabStrip(openPicker: $newTabPickerOpen)
+
+            GeometryReader { geo in
             let sidebarWidth = sidebarExpanded ? sidebarWide : sidebarNarrow
 
             // An open rail pushes focus mode aside — but by *translation*, not
@@ -221,6 +228,7 @@ struct FleetView: View {
             // transactions on one property.
             .animation(.smooth(duration: 0.3), value: progressPanelOpen)
             .animation(.smooth(duration: 0.3), value: isDetail)
+            }
         }
         .onAppear {
             installKeyboardMonitor()
@@ -391,7 +399,8 @@ struct FleetView: View {
     }
 
     /// Command-[ and Command-Left back out of whatever is open, innermost first.
-    /// Ctrl+Tab walks focus sessions; arrows pick a compass slot while it is open.
+    /// Ctrl+Tab walks the project strip; arrows pick a compass slot while it
+    /// is open.
     ///
     /// Escape dismisses Daddy's own overlays and nothing else. It deliberately
     /// does *not* leave the focus view: inside the pty, Escape belongs to the
@@ -422,13 +431,34 @@ struct FleetView: View {
                 return nil
             }
 
-            // ⌘T toggles your shell beside a focused session. Same reasoning
-            // as ⌘B: Command never reaches the pty, and the shell is not a
-            // tab the agent is entitled to.
+            // ⌘T opens a project tab. Same reasoning as ⌘B: Command never
+            // reaches a pty, so no CLI can ever see it. (It used to toggle
+            // the shell in focus mode; that moved to the shell's own button
+            // and the focus overflow menu.)
             if chords == [.command],
-               event.charactersIgnoringModifiers?.lowercased() == "t",
-               store.detailAgent != nil {
-                store.userShellCollapsed.toggle()
+               event.charactersIgnoringModifiers?.lowercased() == "t" {
+                newTabPickerOpen.toggle()
+                return nil
+            }
+
+            // ⌘W closes the project tab on screen. AppKit would otherwise
+            // take this as "close the window", and the window is the app.
+            if chords == [.command],
+               event.charactersIgnoringModifiers?.lowercased() == "w",
+               let active = store.activeTabID {
+                withAnimation(.smooth(duration: 0.2)) { store.closeTab(active) }
+                return nil
+            }
+
+            // ⌘1…⌘9 jumps straight to a tab on the strip.
+            if chords == [.command],
+               let digit = event.charactersIgnoringModifiers?.first,
+               let number = digit.wholeNumberValue,
+               (1...9).contains(number),
+               store.projectTabs.count >= number {
+                withAnimation(.smooth(duration: 0.2)) {
+                    store.activateTab(store.projectTabs[number - 1].id)
+                }
                 return nil
             }
 
@@ -515,6 +545,21 @@ struct FleetView: View {
            let kind = RadialProviderMenuOverlay.kind(for: event) {
             compassArmedKind = kind
             launchCompassKind(kind)
+            return true
+        }
+
+        // Ctrl+Tab walks the project strip, terminal-app style; Ctrl+Shift+Tab
+        // walks it backwards. With only one tab open there is nothing to walk,
+        // so the chord keeps its old meaning: focus sessions and provider tiles
+        // within this project.
+        if event.keyCode == 48,
+           chords.contains(.control),
+           !chords.contains(.command),
+           !chords.contains(.option),
+           store.projectTabs.count > 1 {
+            withAnimation(.smooth(duration: 0.2)) {
+                store.cycleTab(forward: !chords.contains(.shift))
+            }
             return true
         }
 

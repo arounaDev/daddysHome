@@ -30,6 +30,32 @@ struct ShellTab: Identifiable, Hashable {
     let ordinal: Int
 }
 
+/// A project open in the strip across the top of the fleet.
+///
+/// A tab is a project with its own place on screen: its own agents, its own
+/// shell, its own tree. What is remembered here is only what the interface
+/// needs to put you back where you left it — which agent the tab was showing,
+/// whether it was in focus mode, and which folders its tree had open. The
+/// processes themselves are keyed by agent id, not tab id: closing a tab
+/// never touches an agent, and opening the same project again finds everything
+/// still running.
+struct ProjectTab: Identifiable, Hashable, Codable {
+    let projectID: String
+    var title: String
+
+    /// Which agent's output this tab was showing. Nil means "land on whatever
+    /// the project is currently best at" — see `applyActiveTabSelection`.
+    var selectedAgentID: String?
+
+    /// Which agent was in focus mode, if any.
+    var detailAgentID: String?
+
+    /// The tree expansion this tab owns, by absolute path.
+    var expandedPaths: Set<String>
+
+    var id: String { projectID }
+}
+
 struct MockAgent: Identifiable {
     let id: String
     let projectID: String

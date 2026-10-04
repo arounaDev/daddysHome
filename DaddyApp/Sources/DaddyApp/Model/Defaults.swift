@@ -20,10 +20,19 @@ enum Defaults {
         case userShellCollapsed = "daddy.userShellCollapsed"
         case driveConnected = "daddy.driveConnected"
         case driveAccountEmail = "daddy.driveAccountEmail"
+        case projectTabs = "daddy.projectTabs"
     }
 
     static func set(_ value: String, for key: Key) {
         UserDefaults.standard.set(value, forKey: key.rawValue)
+    }
+
+    static func set(_ value: Data, for key: Key) {
+        UserDefaults.standard.set(value, forKey: key.rawValue)
+    }
+
+    static func data(_ key: Key) -> Data? {
+        UserDefaults.standard.data(forKey: key.rawValue)
     }
 
     static func set(_ value: Double, for key: Key) {

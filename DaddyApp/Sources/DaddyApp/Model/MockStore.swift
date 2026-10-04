@@ -28,8 +28,16 @@ final class MockStore {
     @ObservationIgnored private(set) var workspaceBeforeBoard: OrchestratorWorkspace = .fleet
 
     // Navigation
-    var selectedProjectID: String?
-    var selectedAgentID: String?
+    //
+    // The project is not a free choice anymore: it is the active tab's.
+    // `selectedProjectID` is a view of `projectTabs`, so the whole app —
+    // dashboard scope, launch target, shell, tree — follows the strip with no
+    // changes at the use sites.
+    var selectedProjectID: String? { activeTab?.projectID }
+
+    var selectedAgentID: String? {
+        didSet { rememberSelectionInActiveTab() }
+    }
 
     /// The agent being looked at in the drilled-in detail view, if any.
     ///
@@ -37,11 +45,31 @@ final class MockStore {
     /// expansion state was view-local, which let it drift out of step with
     /// `selectedAgentID` and left the view with no reachable way back to the
     /// grid. Selection and drill-in are now separate, and both live here.
-    var detailAgentID: String?
+    var detailAgentID: String? {
+        didSet { rememberSelectionInActiveTab() }
+    }
 
-    /// Agent IDs in the order they were last focused, most recent first. Drives
-    /// "put me back where I was" when you return to a project.
-    private var detailHistory: [String] = []
+    // Project tabs
+    //
+    // The projects open in the strip across the top of the fleet, in order.
+    // Everything that used to read "the selected project" now follows the
+    // active one, so switching tabs is one property move and the whole app —
+    // dashboard, terminal, shell, tree — goes with it.
+
+    /// The projects open in tabs, in tab order.
+    var projectTabs: [ProjectTab] = []
+
+    /// Which of them is on screen.
+    var activeTabID: String?
+
+    var activeTab: ProjectTab? {
+        guard let activeTabID else { return nil }
+        return projectTabs.first { $0.id == activeTabID }
+    }
+
+    func tab(for projectID: String) -> ProjectTab? {
+        projectTabs.first { $0.id == projectID }
+    }
 
     // Data
     var projects: [MockProject] = []
@@ -264,8 +292,18 @@ final class MockStore {
         orchestratorWorkItems = orchestratorMarkdownStore.loadWorkItems()
         restoreOrchestratorConversations()
         restoreSessions()
-        selectedProjectID = Self.defaultProjectID(in: projects)
-        selectedAgentID = agents.first?.id
+        restoreProjectTabs()
+        if projectTabs.isEmpty {
+            // No record of open tabs: start from the default project. The first
+            // scan may still be in flight — `projects` is often empty at this
+            // point — so when it lands on an empty strip it opens the tab
+            // there instead.
+            if let id = Self.defaultProjectID(in: projects) {
+                openTab(projectID: id)
+            }
+        } else {
+            applyActiveTabSelection()
+        }
         refreshInstalledAgents()
         refreshProviderUsage()
 
@@ -309,36 +347,6 @@ final class MockStore {
         projects.filter { $0.parentID == projectID }
     }
 
-    /// How many projects the rail shows before you ask it for the rest.
-    static let railPreviewCount = 8
-
-    /// The head of `rootProjects`, plus whichever one is selected.
-    ///
-    /// `ProjectScanner` finds every directory under `~/Documents` that looks
-    /// like code — dozens of them — and pins `daddy` first, then most recently
-    /// modified. The top of that list is almost always the answer and the
-    /// tail is almost never it, so the rail folds to the head and offers the
-    /// rest behind one click. Nothing is filtered out; it is only folded.
-    ///
-    /// The selected project is appended wherever it sits, because otherwise
-    /// choosing something from the full list and letting the list fold again
-    /// would hide the very project you are working in — agents, badge and all.
-    var previewRootProjects: [MockProject] {
-        let roots = rootProjects
-        guard roots.count > Self.railPreviewCount else { return roots }
-
-        var shown = Array(roots.prefix(Self.railPreviewCount))
-
-        if let selected = selectedProject {
-            let rootID = selected.parentID ?? selected.id
-            if let root = roots.first(where: { $0.id == rootID }), !shown.contains(root) {
-                shown.append(root)
-            }
-        }
-
-        return shown
-    }
-
     var liveAgentCount: Int {
         agents.filter(\.isLive).count
     }
@@ -378,50 +386,141 @@ final class MockStore {
 
     // MARK: - Selection
 
-    /// Switching project takes the terminal with you.
-    ///
-    /// It used to change `selectedProjectID` and nothing else. `detailAgentID`
-    /// kept pointing at an agent in the *old* project, so the toolbar went on
-    /// describing a session you had navigated away from, while `TerminalPane`
-    /// — which reads `selectedAgentID`, just cleared — dropped to "Select an
-    /// agent to view its output". A full window of nothing, with no way back to
-    /// the fleet except the chevron, and no docked terminal either, because you
-    /// had never actually left focus mode.
-    ///
-    /// So the detail view follows the project: to its best agent if it has one,
-    /// out to the fleet if it does not.
+    /// Every way the app used to "select a project" now lands here: a tree row
+    /// that is also a project, the board's scope picker, a launch, a dispatch.
     func select(project id: String) {
-        guard selectedProjectID != id else { return }
-        selectedProjectID = id
-
-        let target = bestAgent(in: id)
-        selectedAgentID = target?.id
-
-        // Only when already focused. Picking a project from the fleet should
-        // stay on the fleet.
-        guard detailAgentID != nil else { return }
-
-        if let target {
-            openDetail(target.id)
-        } else {
-            closeDetail()
-        }
+        openTab(projectID: id)
     }
 
-    /// The agent to land on when you arrive at a project, in the order a person
-    /// would expect: the one you were last looking at, then whatever is most
-    /// recently running, then nothing — which means the fleet.
-    private func bestAgent(in projectID: String) -> MockAgent? {
-        let live = agents.filter { $0.projectID == projectID && $0.isLive }
-        guard !live.isEmpty else { return nil }
+    // MARK: - Project tabs
 
-        if let remembered = detailHistory.lazy
-            .compactMap({ id in live.first { $0.id == id } })
-            .first {
-            return remembered
+    /// Open a project's tab if it isn't open, and make it the one on screen.
+    ///
+    /// A tab is a place, not a process: nothing here touches an agent. Reopening
+    /// a project you closed finds its sessions exactly where they were.
+    @discardableResult
+    func openTab(projectID: String) -> Bool {
+        guard let project = project(projectID) else { return false }
+
+        if tab(for: projectID) == nil {
+            let rootPath = (project.path as NSString).expandingTildeInPath
+            projectTabs.append(
+                ProjectTab(
+                    projectID: projectID,
+                    title: project.name,
+                    selectedAgentID: nil,
+                    detailAgentID: nil,
+                    expandedPaths: [rootPath]
+                )
+            )
         }
 
-        return live.max { $0.lastOutputAt < $1.lastOutputAt }
+        activateTab(projectID)
+        return true
+    }
+
+    /// Switch which tab is on screen and land the selection where that tab
+    /// left it: the agent it was showing, and its focus view if it had one.
+    ///
+    /// The outgoing tab needs no saving — the `didSet`s on `selectedAgentID`
+    /// and `detailAgentID` have been writing them back on every change, so the
+    /// tab already holds the last thing you looked at.
+    func activateTab(_ projectID: String) {
+        guard activeTabID != projectID, tab(for: projectID) != nil else { return }
+        activeTabID = projectID
+        applyActiveTabSelection()
+        persistProjectTabs()
+    }
+
+    /// Close a tab. Its agents keep running — a tab is a place, not a process.
+    /// Closing the last one falls back to the default project, like closing
+    /// the last shell tab falls back to a fresh shell.
+    func closeTab(_ projectID: String) {
+        guard let index = projectTabs.firstIndex(where: { $0.id == projectID }) else { return }
+
+        let wasActive = activeTabID == projectID
+        projectTabs.remove(at: index)
+
+        guard wasActive else {
+            persistProjectTabs()
+            return
+        }
+
+        // The neighbour on the left, or the new last one — never a jump to the
+        // far end of the strip.
+        let neighbour = projectTabs.indices.contains(index)
+            ? projectTabs[index]
+            : projectTabs.last
+        if let neighbour {
+            activeTabID = neighbour.id
+            applyActiveTabSelection()
+        } else {
+            activeTabID = nil
+            selectedAgentID = nil
+            detailAgentID = nil
+            if let fallback = Self.defaultProjectID(in: projects) {
+                openTab(projectID: fallback)
+            }
+        }
+        persistProjectTabs()
+    }
+
+    /// Next or previous tab on the strip.
+    func cycleTab(forward: Bool) {
+        guard projectTabs.count > 1,
+              let index = projectTabs.firstIndex(where: { $0.id == activeTabID }) else { return }
+        let next = forward
+            ? (index + 1) % projectTabs.count
+            : (index - 1 + projectTabs.count) % projectTabs.count
+        activateTab(projectTabs[next].id)
+    }
+
+    /// The tree expansion the active tab now owns. Called from the rail after
+    /// the tree moves.
+    func setActiveTabExpansion(_ paths: Set<String>) {
+        guard let index = projectTabs.firstIndex(where: { $0.id == activeTabID }),
+              projectTabs[index].expandedPaths != paths else { return }
+        projectTabs[index].expandedPaths = paths
+        persistProjectTabs()
+    }
+
+    /// Which agent a tab lands on, in the order a person would expect: the one
+    /// it was showing, then whatever in the project was active last, then
+    /// nothing.
+    private func landingAgent(in projectID: String) -> MockAgent? {
+        if let remembered = activeTab?.selectedAgentID,
+           let agent = agents.first(where: { $0.id == remembered }) {
+            return agent
+        }
+        return agents
+            .filter { $0.projectID == projectID }
+            .max { $0.lastOutputAt < $1.lastOutputAt }
+    }
+
+    /// Point the whole app at the active tab: project, the agent it was
+    /// showing, and its focus view if it had one. The detail view only comes
+    /// back for agents that are still live — a dead one is a dead end, and the
+    /// fleet is where you go to resume it.
+    private func applyActiveTabSelection() {
+        guard let tab = activeTab else { return }
+
+        selectedAgentID = landingAgent(in: tab.projectID)?.id
+
+        let rememberedDetail = tab.detailAgentID
+            .flatMap { id in agents.first { $0.id == id && $0.isLive } }
+        detailAgentID = rememberedDetail?.id
+    }
+
+    /// The selection writes back to the tab on its own; this is just where it
+    /// goes.
+    private func rememberSelectionInActiveTab() {
+        guard let index = projectTabs.firstIndex(where: { $0.id == activeTabID }) else { return }
+        if projectTabs[index].selectedAgentID != selectedAgentID {
+            projectTabs[index].selectedAgentID = selectedAgentID
+        }
+        if projectTabs[index].detailAgentID != detailAgentID {
+            projectTabs[index].detailAgentID = detailAgentID
+        }
     }
 
     /// Point the docked terminal at a session without leaving the fleet.
@@ -444,19 +543,13 @@ final class MockStore {
         selectedAgentID = id
         detailAgentID = id
 
-        // The rail lists live agents across every project, so opening one can
-        // mean crossing into a different project. Bring the selection with it,
-        // or the tree, the FOCUS footer and the switcher all keep describing
-        // the project you just left.
+        // Opening a session can mean crossing into a different project — a
+        // dispatch, a handoff, a voice command. Bring the tab with it, or the
+        // tree, the FOCUS footer and the switcher all keep describing the
+        // project you just left.
         if let projectID = agents.first(where: { $0.id == id })?.projectID {
-            selectedProjectID = projectID
+            openTab(projectID: projectID)
         }
-
-        // Most recently opened first. This is what "the one I had open" means
-        // when you come back to a project — `lastOutputAt` answers a different
-        // question, since the agent you were reading may well be the quietest.
-        detailHistory.removeAll { $0 == id }
-        detailHistory.insert(id, at: 0)
     }
 
     /// Switch the terminal to another live session without restacking focus
@@ -666,7 +759,7 @@ final class MockStore {
                 sessionID: session.id
             )
             agents.append(card)
-            selectedProjectID = project.id
+            openTab(projectID: project.id)
             selectedAgentID = card.id
             // Launching from inside the detail view moves the detail view with
             // you, rather than leaving it parked on the previous agent while
@@ -1010,7 +1103,6 @@ final class MockStore {
     /// exiting. The card is gone from the UI either way.
     private func discard(_ agentID: String, sessionID: String?) {
         agents.removeAll { $0.id == agentID }
-        detailHistory.removeAll { $0 == agentID }
         forgetReadyAttention(agentID)
         contextHandoffPhases[agentID] = nil
         if pendingContextHandoff?.agentID == agentID { pendingContextHandoff = nil }
@@ -1341,7 +1433,26 @@ extension MockStore {
             guard found != projects else { return }
 
             projects = found
-            if selectedProjectID == nil { selectedProjectID = Self.defaultProjectID(in: found) }
+
+            // A renamed folder keeps its tab; the title follows the name.
+            for index in projectTabs.indices {
+                if let name = found.first(where: { $0.id == projectTabs[index].projectID })?.name,
+                   projectTabs[index].title != name {
+                    projectTabs[index].title = name
+                }
+            }
+
+            // Tabs are for projects that still exist. A folder trashed or
+            // renamed away since the last launch drops out, and if it took
+            // every tab with it the default project takes its place.
+            let ids = Set(found.map(\.id))
+            projectTabs.removeAll { !ids.contains($0.projectID) }
+            if let activeID = activeTabID, !projectTabs.contains(where: { $0.id == activeID }) {
+                activeTabID = projectTabs.first?.id
+            }
+            if projectTabs.isEmpty, let fallback = Self.defaultProjectID(in: found) {
+                openTab(projectID: fallback)
+            }
         }
     }
 
@@ -1405,6 +1516,33 @@ extension MockStore {
         if let collapsed = Defaults.bool(.userShellCollapsed) {
             userShellCollapsed = collapsed
         }
+    }
+
+    // MARK: - Project tabs that persist
+
+    private struct ProjectTabsPayload: Codable {
+        var tabs: [ProjectTab]
+        var activeTabID: String?
+    }
+
+    /// The strip is a setting like the rest: the same projects in the same
+    /// order, same active tab, on the next launch.
+    func persistProjectTabs() {
+        guard let data = try? JSONEncoder().encode(
+            ProjectTabsPayload(tabs: projectTabs, activeTabID: activeTabID)
+        ) else { return }
+        Defaults.set(data, for: .projectTabs)
+    }
+
+    func restoreProjectTabs() {
+        guard let data = Defaults.data(.projectTabs),
+              let payload = try? JSONDecoder().decode(ProjectTabsPayload.self, from: data),
+              !payload.tabs.isEmpty else { return }
+
+        projectTabs = payload.tabs
+        activeTabID = payload.activeTabID.flatMap { id in
+            payload.tabs.contains { $0.id == id } ? id : nil
+        } ?? payload.tabs.first?.id
     }
 
     // MARK: - Work mode
@@ -1607,7 +1745,7 @@ extension MockStore {
                 sessionID: session.id
             )
             agents.append(card)
-            selectedProjectID = project.id
+            openTab(projectID: project.id)
             selectedAgentID = card.id
             if detailAgentID != nil { detailAgentID = card.id }
             persistSessions()

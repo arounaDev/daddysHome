@@ -7,38 +7,15 @@ import SwiftUI
 /// moved up to the rail when the rail gained a second section, so what is left
 /// here is the tree itself and the row it is built from.
 ///
-/// Two things it now does that it did not:
-///
-/// **It shows fewer projects.** `ProjectScanner` finds every directory under
-/// `~/Documents` that looks like code, which is dozens, and most of them are
-/// not things you are working on this month. The list is already sorted
-/// most-recently-modified first, so the top eight are very nearly always the
-/// answer; the rest are one click away and nothing is thrown out.
-///
-/// **It shows files.** Expanding a project used to reveal the one level of
-/// subdirectories `ProjectScanner` happened to collect. With the rail pinned —
-/// or with a file in flight over it — it now reveals what is actually there,
-/// and `FileTreeStore` makes that renameable, deletable and droppable.
-struct ProjectsSection: View {
+/// It used to list every project and let you open the tree under one of them.
+/// Now the tab strip owns the project list, so there is exactly one project to
+/// render: the active tab's. The tree under it is stored on the tab
+/// (`expandedPaths`), not here, so switching tabs puts each tree back the way
+/// you left it.
+struct ActiveProjectSection: View {
     @Environment(MockStore.self) private var store
 
-    /// Owned by the rail, so the tree's disclosure state survives the section
-    /// being rebuilt around it.
-    @Binding var expandedProjectIDs: Set<String>
-
-    /// Also the rail's, and deliberately not persisted: a list that trimmed
-    /// itself back down on the next launch is the point of trimming it.
-    @Binding var showingAllProjects: Bool
-
     let fileTree: FileTreeStore
-
-    /// Files, or just projects.
-    ///
-    /// A hover on the way past the left edge should not unfold a deep tree in
-    /// your face — that is what pinning is for. The exception is a drag, where
-    /// the tree *is* the destination and there is no way to pin the rail with
-    /// a file already in your hand.
-    let showsFileTree: Bool
 
     /// Rename, delete, create, right-click. Pinned only: these want a rail that
     /// will still be there when your hand reaches the keyboard, and a
@@ -48,166 +25,64 @@ struct ProjectsSection: View {
     let onDragTarget: (Bool) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(visibleProjects) { project in
-                projectBlock(project)
-            }
-
-            if store.rootProjects.count > MockStore.railPreviewCount {
-                showAllRow
-            }
-        }
-        // An unpinned rail is about to disappear; a half-typed rename inside it
-        // would be committed by nothing and lost.
-        .onChange(of: actionsEnabled) { _, enabled in
-            if !enabled { fileTree.renaming = nil }
-        }
-    }
-
-    @ViewBuilder
-    private func projectBlock(_ project: MockProject) -> some View {
-        let children = store.childProjects(for: project.id)
-        let isTreeExpanded = expandedProjectIDs.contains(project.id)
-
-        VStack(alignment: .leading, spacing: 4) {
-            ProjectRow(
-                project: project,
-                isSelected: store.selectedProjectID == project.id,
-                sessionCount: store.agentCount(for: project.id),
-                hasChildren: showsFileTree || !children.isEmpty,
-                isExpanded: isTreeExpanded,
-                isDropTarget: fileTree.dropTarget == project.path,
-                isRenaming: fileTree.renaming == project.path,
-                onRename: { renameProject(project, to: $0) },
-                onCancelRename: { fileTree.renaming = nil },
-                // Toggles. It used to only ever *collapse* — a leftover from
-                // when the chevron was the escape hatch from a row that opened
-                // on tap and never closed — so clicking the arrow on a
-                // collapsed project did precisely nothing.
-                onDisclosure: {
-                    withAnimation(.smooth(duration: 0.22)) {
-                        setExpanded(project, !isTreeExpanded)
-                    }
+        if let project = store.selectedProject {
+            VStack(alignment: .leading, spacing: 4) {
+                ProjectRow(
+                    project: project,
+                    isSelected: true,
+                    sessionCount: store.agentCount(for: project.id),
+                    hasChildren: false,
+                    isExpanded: true,
+                    isDropTarget: fileTree.dropTarget == project.path,
+                    isRenaming: fileTree.renaming == project.path,
+                    onRename: { renameProject(project, to: $0) },
+                    onCancelRename: { fileTree.renaming = nil },
+                    onDisclosure: {}
+                ) {
+                    // Selects it in the *tree* as well as in the store. Without
+                    // this the root row was unreachable from the keyboard —
+                    // `fileTree.selection` stayed on whatever file you last
+                    // touched, so ⌘⌫ deleted that instead of doing nothing, and
+                    // Enter renamed it. Only sub-rows were ever selectable.
+                    TreeKeyboard.claim()
+                    fileTree.select(project.path)
                 }
-            ) {
-                // The row is the disclosure. Tapping a project opened it
-                // and nothing else closed it again, so the only way back
-                // was to aim at the chevron — which is there for people
-                // who want to look inside a project without selecting it,
-                // not as the only way out.
-                TreeKeyboard.claim()
-                // Selects it in the *tree* as well as in the store. Without
-                // this a project row was unreachable from the keyboard —
-                // `fileTree.selection` stayed on whatever file you last
-                // touched, so ⌘⌫ deleted that instead of doing nothing, and
-                // Enter renamed it. Only sub-rows were ever selectable.
-                fileTree.select(project.path)
-                withAnimation(.smooth(duration: 0.3)) {
-                    setExpanded(project, !isTreeExpanded)
-                    store.select(project: project.id)
-                }
-            }
-            .modifier(
-                FolderDropTarget(
-                    accepts: true,
-                    onFiles: { fileTree.receive($0, into: project.path) },
-                    onTargetChanged: { targeted in
-                        onDragTarget(targeted)
-                        if targeted {
-                            fileTree.dropTarget = project.path
-                        } else if fileTree.dropTarget == project.path {
-                            fileTree.dropTarget = nil
-                        }
-                    },
-                    onSpringLoad: {
-                        withAnimation(.smooth(duration: 0.2)) { setExpanded(project, true) }
-                    }
-                )
-            )
-
-            if isTreeExpanded {
-                if showsFileTree {
-                    ProjectFileTree(
-                        root: project.path,
-                        fileTree: fileTree,
-                        actionsEnabled: actionsEnabled,
-                        onDragTarget: onDragTarget
-                    )
-                    .padding(.leading, 6)
-                    .transition(.opacity)
-                } else {
-                    ForEach(children) { child in
-                        ProjectRow(
-                            project: child,
-                            isSelected: store.selectedProjectID == child.id,
-                            sessionCount: store.agentCount(for: child.id),
-                            hasChildren: false,
-                            isExpanded: false,
-                            isDropTarget: fileTree.dropTarget == child.path,
-                            isRenaming: fileTree.renaming == child.path,
-                            onRename: { renameProject(child, to: $0) },
-                            onCancelRename: { fileTree.renaming = nil },
-                            onDisclosure: {}
-                        ) {
-                            TreeKeyboard.claim()
-                            fileTree.select(child.path)
-                            withAnimation(.smooth(duration: 0.3)) {
-                                store.select(project: child.id)
+                .modifier(
+                    FolderDropTarget(
+                        accepts: true,
+                        onFiles: { fileTree.receive($0, into: project.path) },
+                        onTargetChanged: { targeted in
+                            onDragTarget(targeted)
+                            if targeted {
+                                fileTree.dropTarget = project.path
+                            } else if fileTree.dropTarget == project.path {
+                                fileTree.dropTarget = nil
                             }
-                        }
-                        .padding(.leading, 20)
-                        .modifier(
-                            FolderDropTarget(
-                                accepts: true,
-                                onFiles: { fileTree.receive($0, into: child.path) },
-                                onTargetChanged: { targeted in
-                                    onDragTarget(targeted)
-                                    if targeted {
-                                        fileTree.dropTarget = child.path
-                                    } else if fileTree.dropTarget == child.path {
-                                        fileTree.dropTarget = nil
-                                    }
-                                },
-                                onSpringLoad: {}
-                            )
-                        )
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
-                }
-            }
-        }
-    }
-
-    private var showAllRow: some View {
-        Button {
-            withAnimation(.smooth(duration: 0.25)) { showingAllProjects.toggle() }
-        } label: {
-            HStack(spacing: 7) {
-                Image(systemName: showingAllProjects ? "chevron.up" : "ellipsis")
-                    .font(.system(size: 9, weight: .bold))
-                    .frame(width: 12)
-
-                Text(
-                    showingAllProjects
-                        ? "Show fewer"
-                        : "Show all (\(store.rootProjects.count))"
+                        },
+                        onSpringLoad: {}
+                    )
                 )
-                .font(.system(size: 11))
 
-                Spacer(minLength: 4)
+                ProjectFileTree(
+                    root: project.path,
+                    fileTree: fileTree,
+                    actionsEnabled: actionsEnabled,
+                    onDragTarget: onDragTarget
+                )
+                .padding(.leading, 6)
             }
-            .foregroundStyle(DaddyTheme.textMuted)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 7)
-            .contentShape(Rectangle())
+            // An unpinned rail is about to disappear; a half-typed rename
+            // inside it would be committed by nothing and lost.
+            .onChange(of: actionsEnabled) { _, enabled in
+                if !enabled { fileTree.renaming = nil }
+            }
+        } else {
+            Text("No project")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(DaddyTheme.textVeryDim)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
         }
-        .buttonStyle(.plain)
-    }
-
-    // MARK: Which projects
-
-    private var visibleProjects: [MockProject] {
-        showingAllProjects ? store.rootProjects : store.previewRootProjects
     }
 
     private func renameProject(_ project: MockProject, to name: String) {
@@ -217,21 +92,6 @@ struct ProjectsSection: View {
         }
         fileTree.rename(entry, to: name)
     }
-
-    // MARK: Expansion
-
-    private func setExpanded(_ project: MockProject, _ value: Bool) {
-        if value {
-            guard !expandedProjectIDs.contains(project.id) else { return }
-            expandedProjectIDs.insert(project.id)
-            fileTree.expand(project.path)
-        } else {
-            guard expandedProjectIDs.contains(project.id) else { return }
-            expandedProjectIDs.remove(project.id)
-            fileTree.collapse(project.path)
-        }
-    }
-
 }
 
 // MARK: - Row

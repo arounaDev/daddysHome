@@ -11,8 +11,9 @@ import DaddyCore
 /// The one thing you most want while a terminal is open is the state of
 /// everything that is not that terminal.
 ///
-/// Two sections, one scroll view: the project tree, and every live agent. Both
-/// stay legible when the rail is collapsed to a strip of dots.
+/// Two sections, one scroll view: the active tab's tree, and that project's
+/// live agents. The rest of the projects live on the tab strip; the rail is
+/// scoped to what is on screen.
 struct WorkspaceRail: View {
     @Environment(MockStore.self) private var store
 
@@ -26,15 +27,11 @@ struct WorkspaceRail: View {
     /// set it: a keyboard toggle that only moved `expanded` would be undone by
     /// the next hover, which is not what a deliberate keypress means.
     @Binding var pinned: Bool
-    @State private var expandedProjectIDs: Set<String> = []
 
     /// What is on disk under each project, and what you are doing to it.
     /// Owned here rather than by the section, so expansion, selection and the
     /// open directory watchers survive the section being rebuilt.
     @State private var fileTree = FileTreeStore()
-
-    /// The project list is folded to its first eight by default (`daddy`, then recency).
-    @State private var showingAllProjects = false
 
     /// True while a drag is somewhere over the rail.
     ///
@@ -105,9 +102,11 @@ struct WorkspaceRail: View {
     /// it went before it gets out of the way.
     private static let postDropHold: Duration = .seconds(2)
 
+    /// The agents the rail is about: the active tab's live ones, newest first.
     private var liveAgents: [MockAgent] {
-        store.agents
-            .filter(\.isLive)
+        guard let pid = store.selectedProjectID else { return [] }
+        return store.agents
+            .filter { $0.projectID == pid && $0.isLive }
             .sorted { $0.lastOutputAt > $1.lastOutputAt }
     }
 
@@ -118,14 +117,8 @@ struct WorkspaceRail: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
-                        ProjectsSection(
-                            expandedProjectIDs: $expandedProjectIDs,
-                            showingAllProjects: $showingAllProjects,
+                        ActiveProjectSection(
                             fileTree: fileTree,
-                            // Pinned, or with a file in flight. There is no way
-                            // to pin the rail once a drag has started, so a
-                            // drag has to be able to unfold the tree itself.
-                            showsFileTree: pinned || dragHovering,
                             actionsEnabled: pinned,
                             onDragTarget: dragTargetChanged
                         )
@@ -198,6 +191,7 @@ struct WorkspaceRail: View {
         .onAppear {
             syncTreeRoots()
             installTreeKeyMonitor()
+            applyActiveTabExpansion()
         }
         .onChange(of: store.projects) { _, _ in syncTreeRoots() }
         // A trashed or renamed project root is still a row until `MockStore`
@@ -205,7 +199,23 @@ struct WorkspaceRail: View {
         .onChange(of: fileTree.lastStructuralChangeAt) { _, changed in
             if changed != nil { store.refreshProjects() }
         }
-        .onChange(of: store.selectedProjectID) { _, _ in syncTreeRoots() }
+        // The tab changed: point the tree at it — both the selection root the
+        // keyboard needs and the folders it had open. Applying fires the
+        // expansion observer below, which writes the same set straight back to
+        // the (new) active tab; that round trip is idempotent by construction.
+        .onChange(of: store.activeTabID) { _, _ in
+            syncTreeRoots()
+            applyActiveTabExpansion()
+            // The selection belonged to the project you just left. With
+            // nothing picked, `creationDirectory` falls back to the selected
+            // root; a rename field from the other project must not survive.
+            fileTree.selection = nil
+            fileTree.renaming = nil
+        }
+        // Every expand and collapse belongs to the tab on screen.
+        .onChange(of: fileTree.expanded) { _, paths in
+            store.setActiveTabExpansion(paths)
+        }
         .alert(
             fileTree.errorMessage ?? "",
             isPresented: Binding(
@@ -228,10 +238,12 @@ struct WorkspaceRail: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            Text("PROJECTS")
+            Text(store.selectedProject?.name.uppercased() ?? "PROJECTS")
                 .font(.system(size: 12, weight: .bold))
                 .tracking(0.8)
                 .foregroundStyle(DaddyTheme.textPrimary)
+                .lineLimit(1)
+                .truncationMode(.tail)
 
             Spacer()
 
@@ -265,7 +277,7 @@ struct WorkspaceRail: View {
             ForEach(liveAgents) { agent in
                 RailAgentRow(
                     agent: agent,
-                    projectName: store.project(agent.projectID)?.name ?? agent.projectID,
+                    title: agent.label,
                     isFocused: store.detailAgentID == agent.id
                 ) {
                     withAnimation(.smooth(duration: 0.2)) { store.openDetail(agent.id) }
@@ -293,9 +305,9 @@ struct WorkspaceRail: View {
 
     // MARK: Collapsed
     //
-    // A strip of dots, and it has to carry both kinds of state: which projects
-    // have agents, and what those agents are doing. A collapsed rail that only
-    // showed projects would be the same blindness this view exists to fix.
+    // A glance at the active tab's live agents — provider badges with a state
+    // dot. Opening another project is the tab strip's job now, so there are no
+    // project dots here anymore.
 
     private var collapsed: some View {
         VStack(spacing: 4) {
@@ -307,41 +319,13 @@ struct WorkspaceRail: View {
             .buttonStyle(.plain)
             .padding(.vertical, 8)
 
-            Divider()
-                .opacity(0.2)
-                .padding(.vertical, 4)
+            if !liveAgents.isEmpty {
+                Divider()
+                    .opacity(0.2)
+                    .padding(.vertical, 4)
 
-            ScrollView {
-                VStack(spacing: 8) {
-                    // Folded the same way the open rail is. A strip of thirty
-                    // identical dots is not a glance at anything.
-                    ForEach(store.previewRootProjects) { project in
-                        Button(action: {
-                            withAnimation(.smooth(duration: 0.3)) {
-                                store.select(project: project.id)
-                            }
-                        }) {
-                            Circle()
-                                .fill(store.agentCount(for: project.id) > 0
-                                      ? DaddyTheme.working : DaddyTheme.textVeryDim)
-                                .frame(width: 8, height: 8)
-                                .overlay(
-                                    Circle().strokeBorder(
-                                        store.selectedProjectID == project.id
-                                            ? DaddyTheme.textPrimary.opacity(0.6) : Color.clear,
-                                        lineWidth: 1.5
-                                    )
-                                )
-                        }
-                        .buttonStyle(.plain)
-                        .help(project.name)
-                    }
-
-                    if !liveAgents.isEmpty {
-                        Divider()
-                            .opacity(0.2)
-                            .padding(.vertical, 4)
-
+                ScrollView {
+                    VStack(spacing: 8) {
                         ForEach(liveAgents) { agent in
                             Button(action: {
                                 withAnimation(.smooth(duration: 0.2)) {
@@ -361,11 +345,11 @@ struct WorkspaceRail: View {
                                     }
                             }
                             .buttonStyle(.plain)
-                            .help("\(store.project(agent.projectID)?.name ?? "") · \(StateColors.name(for: agent.state))")
+                            .help("\(agent.label) · \(StateColors.name(for: agent.state))")
                         }
                     }
+                    .padding(.vertical, 4)
                 }
-                .padding(.vertical, 4)
             }
         }
         .padding(.horizontal, 6)
@@ -409,6 +393,13 @@ struct WorkspaceRail: View {
         }
         let rootID = selected.parentID ?? selected.id
         fileTree.setSelectedRoot(store.project(rootID)?.path ?? selected.path)
+    }
+
+    /// Puts the tree the way the active tab left it. First appearance counts
+    /// too: the store restores tabs before the rail ever mounts.
+    private func applyActiveTabExpansion() {
+        guard let id = store.activeTabID, let tab = store.tab(for: id) else { return }
+        fileTree.applyExpansion(tab.expandedPaths)
     }
 
     private func installTreeKeyMonitor() {
@@ -647,15 +638,14 @@ struct WorkspaceRail: View {
 
 // MARK: - Agent row
 
-/// One live agent, as the rail shows it: the project it is working in, then
+/// One live agent, as the rail shows it: the conversation it is having, then
 /// what it is doing and which CLI is doing it.
 ///
-/// The project name leads rather than the provider, because "daddy" is what you
-/// are looking for and "claude" is a detail about it — the same order the
-/// reference tool uses, and the opposite of the breadcrumb in the toolbar.
+/// The rail is scoped to the active tab, so the project name — which used to
+/// lead here — is redundant: the tab and the rail header both already say it.
 private struct RailAgentRow: View {
     let agent: MockAgent
-    let projectName: String
+    let title: String
     let isFocused: Bool
     let onTap: () -> Void
 
@@ -667,7 +657,7 @@ private struct RailAgentRow: View {
                 ProviderLogo.badge(for: agent.agent, diameter: 24)
 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(projectName)
+                    Text(title)
                         .font(.system(size: 11.5, weight: isFocused ? .semibold : .regular))
                         .foregroundStyle(isFocused ? DaddyTheme.textPrimary : DaddyTheme.textSecondary)
                         .lineLimit(1)
